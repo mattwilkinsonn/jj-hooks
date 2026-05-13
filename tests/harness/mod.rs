@@ -37,6 +37,40 @@ impl TestRepo {
         std::fs::create_dir(&primary).unwrap();
         run_jj(&primary, &["git", "init", "--colocate"]);
 
+        // Pin a deterministic identity inside the repo's config. CI runners
+        // don't have user.name/user.email set, and jj refuses to push
+        // commits with no author. Setting these via `jj config set --repo`
+        // keeps the test hermetic regardless of host state.
+        run_jj(
+            &primary,
+            &["config", "set", "--repo", "user.name", "jj-hooks tests"],
+        );
+        run_jj(
+            &primary,
+            &[
+                "config",
+                "set",
+                "--repo",
+                "user.email",
+                "tests@jj-hooks.invalid",
+            ],
+        );
+
+        // Same for git's local config — `hooks.rs` shells out to
+        // `git commit-tree` to build fixup commits, and commit-tree
+        // requires committer/author identity. Set it locally (not
+        // --global) so we don't pollute the host machine.
+        run(
+            &primary,
+            "git",
+            &["config", "--local", "user.name", "jj-hooks tests"],
+        );
+        run(
+            &primary,
+            "git",
+            &["config", "--local", "user.email", "tests@jj-hooks.invalid"],
+        );
+
         // First commit so we have something to push.
         std::fs::write(primary.join("README"), "init\n").unwrap();
         run_jj(&primary, &["commit", "-m", "initial"]);
