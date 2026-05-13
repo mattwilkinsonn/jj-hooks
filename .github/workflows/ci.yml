@@ -31,6 +31,27 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # markdownlint-cli2 ships on npm; actionlint as a prebuilt tarball.
+      # We install both directly here rather than reusing `just
+      # install-deps` so the lints job stays light (no hook runners
+      # needed just to lint the repo).
+      - name: Install markdownlint-cli2
+        run: npm install -g markdownlint-cli2
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            | tar -xz -C "$HOME/.local/bin" actionlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: markdownlint
+        run: markdownlint-cli2 "**/*.md" "**/*.markdown"
+
+      - name: actionlint
+        run: actionlint .github/workflows/*.yml
+
   test:
     name: Test (${{ matrix.os }})
     strategy:

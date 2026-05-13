@@ -82,8 +82,11 @@ impl Stage {
 
 /// Build the argv for a hook invocation against the from..to ref range.
 ///
-/// pre-commit / prek share a CLI: `<bin> run --hook-stage <stage> --from-ref <from> --to-ref <to>`.
-/// hk uses positional stage and no ref args: `hk run <stage>`.
+/// pre-commit / prek: `<bin> run --hook-stage <stage> --from-ref <from> --to-ref <to>`.
+/// hk: `hk run <stage> --from-ref <from> --to-ref <to>` — hk takes the
+/// same `--from-ref` / `--to-ref` flags as pre-commit, and *needs* them
+/// when running in an ephemeral worktree (otherwise hk tries to resolve
+/// `refs/remotes/origin/HEAD` and errors out).
 ///
 /// Lefthook needs a file list, not refs — use [`lefthook_command`] instead.
 pub fn hook_command(runner: Runner, stage: Stage, from: &str, to: &str) -> Vec<String> {
@@ -98,7 +101,15 @@ pub fn hook_command(runner: Runner, stage: Stage, from: &str, to: &str) -> Vec<S
             "--to-ref".into(),
             to.into(),
         ],
-        Runner::Hk => vec![runner.bin().into(), "run".into(), stage.as_str().into()],
+        Runner::Hk => vec![
+            runner.bin().into(),
+            "run".into(),
+            stage.as_str().into(),
+            "--from-ref".into(),
+            from.into(),
+            "--to-ref".into(),
+            to.into(),
+        ],
         Runner::Lefthook => panic!(
             "lefthook does not take ref bounds; use lefthook_command with a file list instead"
         ),

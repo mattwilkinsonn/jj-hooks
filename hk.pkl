@@ -1,0 +1,44 @@
+amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Builtins.pkl"
+
+// markdownlint-cli2 is the maintained replacement for the original
+// markdownlint CLI. hk's builtin still shells out to plain `markdownlint`,
+// so define the step ourselves to call cli2.
+local markdown_lint_cli2 = new Step {
+    glob = List("**/*.md", "**/*.markdown")
+    check = "markdownlint-cli2 {{ files }}"
+    fix = "markdownlint-cli2 --fix {{ files }}"
+}
+
+// Fast checks — run on pre-commit (and again on pre-push for completeness).
+local fastLinters = new Mapping<String, Step> {
+    ["cargo_fmt"] = Builtins.cargo_fmt
+    ["markdown_lint"] = markdown_lint_cli2
+    ["actionlint"] = Builtins.actionlint
+}
+
+// Slow checks — pre-push only. cargo_clippy compiles the whole crate, so
+// keeping it off the pre-commit path keeps `jj-hooks run` snappy for
+// per-change validation.
+local slowLinters = (fastLinters) {
+    ["cargo_clippy"] = Builtins.cargo_clippy
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = fastLinters
+    }
+    ["pre-push"] {
+        fix = false
+        steps = slowLinters
+    }
+    ["fix"] {
+        fix = true
+        steps = fastLinters
+    }
+    ["check"] {
+        steps = slowLinters
+    }
+}

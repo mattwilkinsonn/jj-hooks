@@ -4,15 +4,16 @@ set dotenv-load := false
 default:
     @just --list
 
-# Install all supported hook runners. macOS uses Homebrew, Linux uses
-# `uv` for pre-commit and prek, a curl download for lefthook, and
-# `cargo binstall` (prebuilt binary) for hk.
+# Install all supported hook runners and the lint binaries hk.pkl needs.
+# macOS uses Homebrew. Linux uses `uv` for the Python backends, `npm` for
+# markdownlint-cli2, prebuilt tarballs for lefthook/actionlint, and
+# `cargo binstall` for hk.
 install-deps:
     #!/usr/bin/env bash
     set -euo pipefail
     case "$(uname -s)" in
         Darwin)
-            brew install pre-commit prek lefthook hk
+            brew install pre-commit prek lefthook hk markdownlint-cli2 actionlint
             ;;
         Linux)
             mkdir -p "$HOME/.local/bin"
@@ -24,10 +25,10 @@ install-deps:
             lefthook_version=2.1.6
             arch="$(uname -m)"
             case "$arch" in
-                x86_64)  lefthook_arch=x86_64 ;;
-                aarch64) lefthook_arch=arm64 ;;
+                x86_64)  lefthook_arch=x86_64; actionlint_arch=amd64 ;;
+                aarch64) lefthook_arch=arm64;  actionlint_arch=arm64 ;;
                 *)
-                    echo "unsupported Linux arch for lefthook: $arch" >&2
+                    echo "unsupported Linux arch: $arch" >&2
                     exit 1
                     ;;
             esac
@@ -36,6 +37,21 @@ install-deps:
             curl -fsSL "https://github.com/evilmartians/lefthook/releases/download/v${lefthook_version}/lefthook_${lefthook_version}_Linux_${lefthook_arch}" \
                 -o "$HOME/.local/bin/lefthook"
             chmod +x "$HOME/.local/bin/lefthook"
+
+            # actionlint ships as a prebuilt tarball. Extract just the
+            # binary into ~/.local/bin.
+            actionlint_version=1.7.12
+            curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${actionlint_version}/actionlint_${actionlint_version}_linux_${actionlint_arch}.tar.gz" \
+                | tar -xz -C "$HOME/.local/bin" actionlint
+
+            # markdownlint-cli2 lives on npm. Assumes node + npm are on
+            # PATH (preinstalled on GitHub Linux runners; users may need
+            # `apt install nodejs npm` locally).
+            if command -v npm >/dev/null 2>&1; then
+                npm install -g markdownlint-cli2
+            else
+                echo "warn: npm not on PATH; install Node.js to get markdownlint-cli2" >&2
+            fi
 
             # cargo binstall pulls prebuilt artifacts (much faster than
             # building from source). Bootstrap it if it's missing.
@@ -50,22 +66,22 @@ install-deps:
             ;;
     esac
 
-# Verify all four runners resolve on PATH.
+# Verify all four runners + the lint binaries hk.pkl needs are on PATH.
 check-deps:
     #!/usr/bin/env bash
     set -euo pipefail
     missing=()
-    for bin in pre-commit prek lefthook hk; do
+    for bin in pre-commit prek lefthook hk markdownlint-cli2 actionlint; do
         if ! command -v "$bin" >/dev/null 2>&1; then
             missing+=("$bin")
         fi
     done
     if [ ${#missing[@]} -gt 0 ]; then
-        echo "missing hook runners: ${missing[*]}" >&2
+        echo "missing tools: ${missing[*]}" >&2
         echo "run \`just install-deps\` to install them" >&2
         exit 1
     fi
-    echo "all hook runners installed: pre-commit prek lefthook hk"
+    echo "all tools installed"
 
 build:
     cargo build --all-targets

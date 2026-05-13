@@ -48,13 +48,35 @@ fn prek_pre_push() {
 #[test]
 fn hk_pre_push() {
     let cmd = hook_command(Runner::Hk, Stage::PrePush, "old", "new");
-    assert_eq!(cmd, vec!["hk", "run", "pre-push"]);
+    assert_eq!(
+        cmd,
+        vec![
+            "hk",
+            "run",
+            "pre-push",
+            "--from-ref",
+            "old",
+            "--to-ref",
+            "new",
+        ]
+    );
 }
 
 #[test]
 fn hk_pre_commit() {
     let cmd = hook_command(Runner::Hk, Stage::PreCommit, "old", "new");
-    assert_eq!(cmd, vec!["hk", "run", "pre-commit"]);
+    assert_eq!(
+        cmd,
+        vec![
+            "hk",
+            "run",
+            "pre-commit",
+            "--from-ref",
+            "old",
+            "--to-ref",
+            "new",
+        ]
+    );
 }
 
 #[test]
@@ -171,18 +193,12 @@ fn prefer_prek_does_not_swap_lefthook() {
 
 #[test]
 fn prefer_prek_does_not_swap_hk() {
-    assert_eq!(
-        prefer_prek_when_available(Runner::Hk, true),
-        Runner::Hk
-    );
+    assert_eq!(prefer_prek_when_available(Runner::Hk, true), Runner::Hk);
 }
 
 #[test]
 fn prefer_prek_is_idempotent_on_prek() {
-    assert_eq!(
-        prefer_prek_when_available(Runner::Prek, true),
-        Runner::Prek
-    );
+    assert_eq!(prefer_prek_when_available(Runner::Prek, true), Runner::Prek);
     assert_eq!(
         prefer_prek_when_available(Runner::Prek, false),
         Runner::Prek
