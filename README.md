@@ -5,6 +5,14 @@ Run [pre-commit](https://pre-commit.com/), [prek](https://github.com/j178/prek),
 [hk](https://hk.jdx.dev) hooks against [jj](https://jj-vcs.github.io) bookmark
 pushes — with full support for secondary jj workspaces.
 
+## Prior art
+
+- [jj-pre-push](https://github.com/acarapetis/jj-pre-push) — the Python tool
+  that originally inspired this. `jj-hooks` adopts its bookmark-update
+  parsing strategy and broadens the runner/workspace support.
+- <https://www.aazuspan.dev/blog/automating-pre-push-checks-with-jujutsu/>
+- Discussion on <https://github.com/jj-vcs/jj/issues/405>
+
 ## What it does
 
 `jj-hooks push` is a drop-in replacement for `jj git push`:
@@ -153,14 +161,6 @@ just ci             # fmt-check + clippy + test
 The test suite includes integration tests that build real jj+git repos in
 tempdirs, install local pre-commit hooks, and run the full push pipeline —
 including the secondary-workspace path.
-
-## Prior art
-
-- [jj-pre-push](https://github.com/acarapetis/jj-pre-push) — the Python tool
-  that originally inspired this. `jj-hooks` adopts its bookmark-update
-  parsing strategy and broadens the runner support.
-- <https://www.aazuspan.dev/blog/automating-pre-push-checks-with-jujutsu/>
-- Discussion on <https://github.com/jj-vcs/jj/issues/405>
 
 ## License
 
