@@ -51,18 +51,37 @@ jobs:
           shared-key: "test-${{ matrix.os }}"
           save-if: "true"
 
-      # Pre-built cargo-nextest binary from GitHub Releases — much
-      # faster than `cargo install`. Same for just (used by install-deps).
-      # jj has prebuilt binaries on its release page; install-action
-      # handles all three from the same caching layer.
+      # Pre-built binaries for cargo-nextest, just, cargo-binstall.
+      # install-action pulls them from each tool's GitHub Releases — much
+      # faster than `cargo install`. cargo-binstall is then used inside
+      # the install-deps recipe to fetch hk's prebuilt binary too.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,just,cargo-binstall
 
-      - name: Install jj
-        uses: taiki-e/install-action@v2
-        with:
-          tool: jj
+      # jj has no install-action manifest yet, and the `jj` crate on
+      # crates.io is a squatter that compile-errors pointing at jj-cli.
+      # Just download the prebuilt tarball from the jj-vcs/jj release
+      # page directly — ~5s vs multi-minute compile.
+      - name: Install jj from prebuilt tarball
+        run: |
+          set -euo pipefail
+          jj_version=v0.41.0
+          case "$(uname -s)-$(uname -m)" in
+              Linux-x86_64)   triple=x86_64-unknown-linux-musl ;;
+              Linux-aarch64)  triple=aarch64-unknown-linux-musl ;;
+              Darwin-arm64)   triple=aarch64-apple-darwin ;;
+              Darwin-x86_64)  triple=x86_64-apple-darwin ;;
+              *)
+                  echo "unsupported host: $(uname -s)-$(uname -m)" >&2
+                  exit 1
+                  ;;
+          esac
+          url="https://github.com/jj-vcs/jj/releases/download/${jj_version}/jj-${jj_version}-${triple}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "$url" | tar -xz -C "$HOME/.local/bin" jj
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/jj" --version
 
       # Install all four supported hook runners (pre-commit, prek,
       # lefthook, hk). macOS uses Homebrew; Linux uses uv for the Python
