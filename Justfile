@@ -111,19 +111,21 @@ ci: fmt-check clippy test
 install-debug:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build
+    cargo build --bin jj-hooks --bin jj-hp
     dest="${CARGO_HOME:-$HOME/.cargo}/bin"
     mkdir -p "$dest"
     # On Linux, writing over an in-use executable fails with ETXTBSY
     # (text file busy). Unlink first so a running process keeps its
     # inode while we drop a fresh one at the path. macOS lets you
     # overwrite an active binary, so the unlink is a no-op there.
-    rm -f "$dest/jj-hooks"
-    cp target/debug/jj-hooks "$dest/jj-hooks"
-    if [[ "$(uname)" == "Darwin" ]]; then
-        codesign -s - "$dest/jj-hooks" 2>/dev/null && echo "Codesigned jj-hooks" || true
-    fi
-    echo "Installed debug build to $dest/jj-hooks"
+    for bin in jj-hooks jj-hp; do
+        rm -f "$dest/$bin"
+        cp "target/debug/$bin" "$dest/$bin"
+        if [[ "$(uname)" == "Darwin" ]]; then
+            codesign -s - "$dest/$bin" 2>/dev/null && echo "Codesigned $bin" || true
+        fi
+    done
+    echo "Installed debug builds (jj-hooks + jj-hp) to $dest"
 
 # Install a release build to ~/.cargo/bin. Codesigns on macOS.
 install: build-release
@@ -131,16 +133,17 @@ install: build-release
     set -euo pipefail
     dest="${CARGO_HOME:-$HOME/.cargo}/bin"
     mkdir -p "$dest"
-    # See install-debug for the ETXTBSY rationale.
-    rm -f "$dest/jj-hooks"
-    cp target/release/jj-hooks "$dest/jj-hooks"
-    if [[ "$(uname)" == "Darwin" ]]; then
-        codesign -s - "$dest/jj-hooks" 2>/dev/null && echo "Codesigned jj-hooks" || true
-    fi
-    echo "Installed release build to $dest/jj-hooks"
+    for bin in jj-hooks jj-hp; do
+        rm -f "$dest/$bin"
+        cp "target/release/$bin" "$dest/$bin"
+        if [[ "$(uname)" == "Darwin" ]]; then
+            codesign -s - "$dest/$bin" 2>/dev/null && echo "Codesigned $bin" || true
+        fi
+    done
+    echo "Installed release builds (jj-hooks + jj-hp) to $dest"
 
 build-release:
-    cargo build --release
+    cargo build --release --bin jj-hooks --bin jj-hp
 
 # Cut a release. Bumps Cargo.toml, refreshes Cargo.lock, commits the
 # bump on top of @, tags @- with the version, and exports tags to git.

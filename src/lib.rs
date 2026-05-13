@@ -1,5 +1,11 @@
+//! Library entrypoint shared by the `jj-hooks` and `jj-hp` binaries.
+//!
+//! Both binaries are identical — `jj-hp` is just a shorter name that's
+//! easier to type and that we route the `jj push` alias through.
+
 pub mod bookmark_updates;
 pub mod cli;
+pub mod completions;
 pub mod error;
 pub mod hooks;
 pub mod init;
@@ -7,3 +13,231 @@ pub mod jj;
 pub mod push;
 pub mod runner;
 pub mod worktree;
+
+use std::process::ExitCode;
+
+use clap::Parser;
+use tracing_subscriber::EnvFilter;
+
+use crate::cli::{Cli, Command, RunnerArg};
+use crate::error::JjHooksError;
+use crate::init::InteractivePrompter;
+use crate::jj::JjCli;
+use crate::push::{execute_push, maybe_advance_bookmarks, run_checks};
+use crate::runner::{Runner, Stage};
+
+/// Parse CLI args, dispatch to a subcommand, and return the process exit
+/// code. Both `bin/jj-hooks` and `bin/jj-hp` are trivial wrappers around
+/// this function.
+pub fn run() -> ExitCode {
+    let cli = Cli::parse();
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+        )
+        .with_target(false)
+        .without_time()
+        .try_init();
+
+    match dispatch(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("jj-hooks: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
+    let jj = JjCli::new(std::env::current_dir()?);
+
+    match cli.command {
+        Command::Push {
+            advance_bookmarks,
+            stage,
+            push,
+            dry_run,
+        } => {
+            let workspace_root = jj.workspace_root()?;
+            // Argv that's just the bookmark selection (no --dry-run) — used
+            // for the dry-run probe that figures out which bookmarks would
+            // change. Adding --dry-run here would double up since the probe
+            // already adds it.
+            let select_argv = crate::cli::push_argv(&push, false);
+            // Argv used to actually push (includes --dry-run if requested).
+            let push_argv = crate::cli::push_argv(&push, dry_run);
+
+            let Some(runner) = resolve_runner(cli.runner, &workspace_root)? else {
+                tracing::info!("no hook-runner config detected; falling through to jj git push");
+                execute_push(&jj, &push_argv, false)?;
+                return Ok(ExitCode::SUCCESS);
+            };
+
+            let report = run_checks(&jj, &workspace_root, runner, stage.into(), &select_argv)?;
+
+            if report.skipped {
+                execute_push(&jj, &push_argv, false)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            for (update, outcome) in &report.per_bookmark {
+                if !outcome.success {
+                    eprintln!("jj-hooks: {update}: hook failed");
+                }
+                if let Some(commit) = &outcome.fixup_commit {
+                    eprintln!("jj-hooks: {update}: hooks modified files (fixup commit {commit})");
+                }
+            }
+
+            let advance = advance_bookmarks || advance_bookmarks_from_config(&jj);
+            let advanced = maybe_advance_bookmarks(&jj, &report, advance)?;
+            for name in advanced {
+                eprintln!("jj-hooks: advanced bookmark {name} to fixup commit");
+            }
+
+            if report.any_failure() || report.any_fixup() {
+                eprintln!("jj-hooks: aborting push");
+                return Ok(ExitCode::from(1));
+            }
+
+            execute_push(&jj, &push_argv, false)?;
+            Ok(ExitCode::SUCCESS)
+        }
+
+        Command::Run { stage, revset } => {
+            let workspace_root = jj.workspace_root()?;
+            let Some(runner) = resolve_runner(cli.runner, &workspace_root)? else {
+                tracing::info!("no hook-runner config detected; nothing to do");
+                return Ok(ExitCode::SUCCESS);
+            };
+
+            run_against_revset(&jj, &workspace_root, runner, stage.into(), &revset)
+        }
+
+        Command::Init => {
+            let detected = jj
+                .workspace_root()
+                .ok()
+                .and_then(|root| Runner::autodetect(&root).ok().flatten());
+            let mut prompter = InteractivePrompter;
+            let plan = init::plan(detected, &mut prompter)?;
+            let outcome = init::apply(&plan, None, None)?;
+            if outcome.alias_set {
+                eprintln!("jj-hooks: installed `aliases.push` = jj-hp push");
+            }
+            if outcome.advance_bookmarks_set {
+                eprintln!("jj-hooks: set `jj-hooks.advance-bookmarks = true`");
+            }
+            let jjui = outcome.jjui_actions_added;
+            if jjui.added_jj_push
+                || jjui.added_jj_push_selected
+                || jjui.added_binding_x_p
+                || jjui.added_binding_x_p_caps
+            {
+                eprintln!("jj-hooks: merged jjui actions/bindings into jjui config");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            // We pick the binary name dynamically from argv[0] so the
+            // generated script targets whichever name the user invoked
+            // (`jj-hooks` vs `jj-hp`).
+            let bin_name = std::env::args()
+                .next()
+                .and_then(|arg0| {
+                    std::path::Path::new(&arg0)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "jj-hp".into());
+            clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn resolve_runner(
+    flag: Option<RunnerArg>,
+    workspace_root: &std::path::Path,
+) -> Result<Option<Runner>, JjHooksError> {
+    if let Some(r) = flag {
+        // User asked for a specific runner — honor it exactly.
+        return Ok(Some(r.into()));
+    }
+    let autodetected = Runner::autodetect(workspace_root)?;
+    Ok(autodetected.map(|r| {
+        // prek is a faster drop-in for pre-commit; prefer it when present.
+        crate::runner::prefer_prek_when_available(r, crate::runner::prek_on_path())
+    }))
+}
+
+fn advance_bookmarks_from_config(jj: &JjCli) -> bool {
+    matches!(
+        jj.run(&["config", "get", "jj-hooks.advance-bookmarks"])
+            .ok()
+            .map(|s| s.trim().to_owned()),
+        Some(ref v) if v == "true"
+    )
+}
+
+fn run_against_revset(
+    jj: &JjCli,
+    workspace_root: &std::path::Path,
+    runner: Runner,
+    stage: Stage,
+    revset: &str,
+) -> Result<ExitCode, JjHooksError> {
+    let target = jj.run(&[
+        "log",
+        "--no-graph",
+        "-r",
+        revset,
+        "-T",
+        "commit_id",
+        "--limit",
+        "1",
+        "--ignore-working-copy",
+    ])?;
+    let target = target.trim();
+    if target.is_empty() {
+        eprintln!("jj-hooks: revset `{revset}` is empty");
+        return Ok(ExitCode::from(2));
+    }
+
+    let parent = jj.run(&[
+        "log",
+        "--no-graph",
+        "-r",
+        &format!("{target}-"),
+        "-T",
+        "commit_id",
+        "--limit",
+        "1",
+        "--ignore-working-copy",
+    ])?;
+    let parent = parent.trim().to_owned();
+
+    let update = bookmark_updates::BookmarkUpdate {
+        remote: "<local>".into(),
+        bookmark: format!("revset:{revset}"),
+        update_type: bookmark_updates::UpdateType::MoveForward,
+        old_commit: Some(parent),
+        new_commit: Some(target.to_owned()),
+    };
+
+    let primary_git_dir = jj::primary_git_dir(workspace_root)?;
+    let outcome = hooks::run_for_update(jj, &primary_git_dir, runner, stage, &update)?;
+
+    if let Some(commit) = &outcome.fixup_commit {
+        eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
+    }
+    if outcome.success && outcome.fixup_commit.is_none() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
+}

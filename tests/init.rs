@@ -81,7 +81,7 @@ fn apply_writes_expected_config_keys() {
 
     let contents = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        contents.contains(r#"push = ["util", "exec", "--", "jj-hooks", "push"]"#),
+        contents.contains(r#"push = ["util", "exec", "--", "jj-hp", "push"]"#),
         "alias not written:\n{contents}"
     );
     assert!(
@@ -155,6 +155,23 @@ fn add_jjui_actions_to_empty_config() {
     }
     assert!(found_xp, "expected jj-push bound to x p");
     assert!(found_xp_caps, "expected jj-push-selected bound to x P");
+
+    // The lua bodies should invoke jj-hp directly (not `jj_async("push")`)
+    // so the actions don't require the `jj push` alias to be installed.
+    let lua_bodies: Vec<&str> = actions
+        .iter()
+        .filter_map(|v| v.get("lua").and_then(|l| l.as_str()))
+        .collect();
+    for lua in &lua_bodies {
+        assert!(
+            lua.contains("jj-hp"),
+            "lua body should call jj-hp directly:\n{lua}"
+        );
+        assert!(
+            !lua.contains("jj_async(\"push\""),
+            "lua should not depend on the `jj push` alias:\n{lua}"
+        );
+    }
 }
 
 #[test]

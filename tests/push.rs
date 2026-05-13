@@ -6,7 +6,11 @@
 
 mod harness;
 
-use harness::{PRE_PUSH_AUTOFIX, PRE_PUSH_FAILING, PRE_PUSH_PASSING, TestRepo, show};
+use harness::{
+    HK_PRE_PUSH_AUTOFIX, HK_PRE_PUSH_FAILING, HK_PRE_PUSH_PASSING, LEFTHOOK_PRE_PUSH_AUTOFIX,
+    LEFTHOOK_PRE_PUSH_FAILING, LEFTHOOK_PRE_PUSH_PASSING, PRE_PUSH_AUTOFIX, PRE_PUSH_FAILING,
+    PRE_PUSH_PASSING, TestRepo, show,
+};
 
 /// Sanity: harness builds a working primary + remote and `jj git push` works
 /// directly. If this fails the rest of the tests are noise.
@@ -56,7 +60,7 @@ fn delete_only_push_skips_hooks() {
     assert!(out.status.success(), "{}", show(&out));
 
     // Delete-only push should skip hooks even though config says "always fail".
-    let out = repo.jj_hooks(&["push", "-b", "tmp"]);
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "push", "-b", "tmp"]);
     assert!(out.status.success(), "{}", show(&out));
     assert_eq!(repo.remote_commit("tmp"), None);
 }
@@ -74,7 +78,7 @@ fn passing_hooks_pushes() {
 
     let head = repo.commit_id_of("main");
 
-    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "push", "-b", "main"]);
     assert!(out.status.success(), "{}", show(&out));
     assert_eq!(repo.remote_commit("main").as_deref(), Some(head.as_str()));
 }
@@ -92,7 +96,7 @@ fn failing_hooks_abort_push() {
 
     let remote_before = repo.remote_commit("main");
 
-    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "push", "-b", "main"]);
     assert!(
         !out.status.success(),
         "expected nonzero exit:\n{}",
@@ -119,7 +123,7 @@ fn hook_autofix_creates_fixup_ref_and_aborts_push() {
     let remote_before = repo.remote_commit("main");
     let local_main_before = repo.commit_id_of("main");
 
-    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "push", "-b", "main"]);
     assert!(
         !out.status.success(),
         "expected nonzero exit:\n{}",
@@ -153,7 +157,14 @@ fn hook_autofix_with_advance_bookmarks_moves_local_bookmark() {
 
     let local_main_before = repo.commit_id_of("main");
 
-    let out = repo.jj_hooks(&["push", "--advance-bookmarks", "-b", "main"]);
+    let out = repo.jj_hooks(&[
+        "--runner",
+        "pre-commit",
+        "push",
+        "--advance-bookmarks",
+        "-b",
+        "main",
+    ]);
     assert!(
         !out.status.success(),
         "expected nonzero exit:\n{}",
@@ -191,7 +202,10 @@ fn hook_autofix_from_secondary_workspace() {
 
     let secondary = repo.add_secondary("secondary");
 
-    let out = repo.jj_hooks_in(&secondary, &["push", "-b", "main"]);
+    let out = repo.jj_hooks_in(
+        &secondary,
+        &["--runner", "pre-commit", "push", "-b", "main"],
+    );
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !stderr.contains("Your pre-commit configuration is unstaged"),
@@ -222,7 +236,14 @@ fn new_bookmark_uses_remote_ancestors_resolution() {
 
     let head = repo.commit_id_of("feature");
 
-    let out = repo.jj_hooks(&["push", "-b", "feature", "--allow-new"]);
+    let out = repo.jj_hooks(&[
+        "--runner",
+        "pre-commit",
+        "push",
+        "-b",
+        "feature",
+        "--allow-new",
+    ]);
     assert!(out.status.success(), "{}", show(&out));
     assert_eq!(
         repo.remote_commit("feature").as_deref(),
@@ -254,7 +275,16 @@ fn multi_bookmark_one_fail_blocks_all() {
     let main_remote_before = repo.remote_commit("main");
     let feature_remote_before = repo.remote_commit("feature");
 
-    let out = repo.jj_hooks(&["push", "-b", "main", "-b", "feature", "--allow-new"]);
+    let out = repo.jj_hooks(&[
+        "--runner",
+        "pre-commit",
+        "push",
+        "-b",
+        "main",
+        "-b",
+        "feature",
+        "--allow-new",
+    ]);
     assert!(!out.status.success(), "{}", show(&out));
 
     assert_eq!(repo.remote_commit("main"), main_remote_before);
@@ -272,8 +302,187 @@ fn run_subcommand_executes_hooks_without_pushing() {
 
     let remote_before = repo.remote_commit("main");
 
-    let out = repo.jj_hooks(&["run", "--stage", "pre-push", "@-"]);
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "run", "--stage", "pre-push", "@-"]);
     assert!(out.status.success(), "{}", show(&out));
     // Remote unchanged — run does not push.
     assert_eq!(repo.remote_commit("main"), remote_before);
+}
+
+// -- prek -------------------------------------------------------------------
+//
+// prek is CLI-compatible with pre-commit and reads the same
+// .pre-commit-config.yaml, so we reuse the existing fixtures. These three
+// tests + the pre-commit ones above cover the runners' identical CLI
+// surface from two different binaries.
+
+#[test]
+fn prek_passing_hooks_pushes() {
+    let repo = TestRepo::new();
+    repo.write_pre_commit_config(PRE_PUSH_PASSING);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let head = repo.commit_id_of("main");
+
+    let out = repo.jj_hooks(&["--runner", "prek", "push", "-b", "main"]);
+    assert!(out.status.success(), "{}", show(&out));
+    assert_eq!(repo.remote_commit("main").as_deref(), Some(head.as_str()));
+}
+
+#[test]
+fn prek_failing_hooks_abort_push() {
+    let repo = TestRepo::new();
+    repo.write_pre_commit_config(PRE_PUSH_FAILING);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let remote_before = repo.remote_commit("main");
+
+    let out = repo.jj_hooks(&["--runner", "prek", "push", "-b", "main"]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(repo.remote_commit("main"), remote_before);
+}
+
+#[test]
+fn prek_hook_autofix_creates_fixup_ref() {
+    let repo = TestRepo::new();
+    repo.write_pre_commit_config(PRE_PUSH_AUTOFIX);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let out = repo.jj_hooks(&["--runner", "prek", "push", "-b", "main"]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert!(
+        repo.refs_matching("refs/heads/jj-hooks-fixup/*")
+            .iter()
+            .any(|r| r == "refs/heads/jj-hooks-fixup/main")
+    );
+}
+
+// -- lefthook ---------------------------------------------------------------
+
+#[test]
+fn lefthook_passing_hooks_pushes() {
+    let repo = TestRepo::new();
+    repo.write_lefthook_config(LEFTHOOK_PRE_PUSH_PASSING);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let head = repo.commit_id_of("main");
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(out.status.success(), "{}", show(&out));
+    assert_eq!(repo.remote_commit("main").as_deref(), Some(head.as_str()));
+}
+
+#[test]
+fn lefthook_failing_hooks_abort_push() {
+    let repo = TestRepo::new();
+    repo.write_lefthook_config(LEFTHOOK_PRE_PUSH_FAILING);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let remote_before = repo.remote_commit("main");
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(repo.remote_commit("main"), remote_before);
+}
+
+#[test]
+fn lefthook_hook_autofix_creates_fixup_ref() {
+    let repo = TestRepo::new();
+    repo.write_lefthook_config(LEFTHOOK_PRE_PUSH_AUTOFIX);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert!(
+        repo.refs_matching("refs/heads/jj-hooks-fixup/*")
+            .iter()
+            .any(|r| r == "refs/heads/jj-hooks-fixup/main")
+    );
+}
+
+// -- hk ---------------------------------------------------------------------
+
+#[test]
+fn hk_passing_hooks_pushes() {
+    let repo = TestRepo::new();
+    repo.write_hk_config(HK_PRE_PUSH_PASSING);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let head = repo.commit_id_of("main");
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(out.status.success(), "{}", show(&out));
+    assert_eq!(repo.remote_commit("main").as_deref(), Some(head.as_str()));
+}
+
+#[test]
+fn hk_failing_hooks_abort_push() {
+    let repo = TestRepo::new();
+    repo.write_hk_config(HK_PRE_PUSH_FAILING);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let remote_before = repo.remote_commit("main");
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(repo.remote_commit("main"), remote_before);
+}
+
+#[test]
+fn hk_hook_autofix_creates_fixup_ref() {
+    let repo = TestRepo::new();
+    repo.write_hk_config(HK_PRE_PUSH_AUTOFIX);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert!(
+        repo.refs_matching("refs/heads/jj-hooks-fixup/*")
+            .iter()
+            .any(|r| r == "refs/heads/jj-hooks-fixup/main")
+    );
 }

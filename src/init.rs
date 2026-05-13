@@ -3,7 +3,7 @@
 //! Three yes/no prompts:
 //! 1. Install a `jj push` alias that delegates to `jj-hooks push`.
 //! 2. Auto-advance bookmarks when hooks modify files.
-//! 3. Install jjui actions/bindings so `jj-hooks push` is reachable from
+//! 3. Install jjui actions/bindings so `jj-hp push` is reachable from
 //!    inside [jjui](https://github.com/idursun/jjui).
 //!
 //! The first two write to the user-level jj config via `jj config set`.
@@ -94,7 +94,7 @@ pub fn plan(detected_runner: Option<Runner>, prompter: &mut dyn Prompter) -> Res
         false,
     )?;
     let install_jjui_actions = prompter.confirm(
-        "Install jjui actions/bindings so `jj push` is reachable from inside jjui?",
+        "Install jjui actions/bindings so `jj-hp push` is reachable from inside jjui?",
         false,
     )?;
 
@@ -129,7 +129,7 @@ pub fn apply(
     if plan.install_alias {
         jj_config_set(
             "aliases.push",
-            r#"["util", "exec", "--", "jj-hooks", "push"]"#,
+            r#"["util", "exec", "--", "jj-hp", "push"]"#,
             jj_config_path,
         )?;
         outcome.alias_set = true;
@@ -244,7 +244,10 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         t.insert("name".into(), toml::Value::String("jj-push".into()));
         t.insert(
             "lua".into(),
-            toml::Value::String("  jj_async(\"push\")\n  revisions.refresh()\n".into()),
+            toml::Value::String(
+                "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\")\n  revisions.refresh()\n"
+                    .into(),
+            ),
         );
         actions_arr.push(toml::Value::Table(t));
         added.added_jj_push = true;
@@ -258,7 +261,7 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         t.insert(
             "lua".into(),
             toml::Value::String(
-                "  jj_async(\"push\", \"-r\", context.commit_id())\n  revisions.refresh()\n".into(),
+                "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\", \"-r\", context.commit_id())\n  revisions.refresh()\n".into(),
             ),
         );
         actions_arr.push(toml::Value::Table(t));

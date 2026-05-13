@@ -110,6 +110,14 @@ impl TestRepo {
         std::fs::write(self.primary.join(".pre-commit-config.yaml"), yaml).unwrap();
     }
 
+    pub fn write_lefthook_config(&self, yaml: &str) {
+        std::fs::write(self.primary.join("lefthook.yml"), yaml).unwrap();
+    }
+
+    pub fn write_hk_config(&self, pkl: &str) {
+        std::fs::write(self.primary.join("hk.pkl"), pkl).unwrap();
+    }
+
     pub fn jj(&self, args: &[&str]) -> Output {
         capture_jj(&self.primary, args)
     }
@@ -289,3 +297,93 @@ repos:
         always_run: true
         pass_filenames: false
 "#;
+
+// -- lefthook fixtures --------------------------------------------------------
+//
+// Lefthook takes per-stage hooks under `<stage>:` and per-step commands
+// under `commands:`. We give every command `glob: "*"` and `run: true|false|...`
+// so they run unconditionally regardless of the file list jj-hooks
+// computes.
+
+pub const LEFTHOOK_PRE_PUSH_PASSING: &str = r#"pre-push:
+  commands:
+    ok:
+      run: "true"
+"#;
+
+pub const LEFTHOOK_PRE_PUSH_FAILING: &str = r#"pre-push:
+  commands:
+    fail:
+      run: "false"
+"#;
+
+pub const LEFTHOOK_PRE_PUSH_AUTOFIX: &str = r#"pre-push:
+  commands:
+    autofix:
+      run: "echo fixed > AUTOFIX_RAN"
+"#;
+
+// -- hk fixtures --------------------------------------------------------------
+//
+// hk configs are written in pkl. To keep test fixtures hermetic we embed
+// the upstream package URL the production hk.pkl uses, then define a
+// single inline step per scenario.
+
+const HK_PRELUDE: &str = r#"amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+"#;
+
+pub const HK_PRE_PUSH_PASSING: &str = r#"amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+
+local linters = new Mapping<String, Step> {
+    ["ok"] {
+        glob = "*"
+        check = "true"
+    }
+}
+
+hooks {
+    ["pre-push"] {
+        fix = false
+        steps = linters
+    }
+}
+"#;
+
+pub const HK_PRE_PUSH_FAILING: &str = r#"amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+
+local linters = new Mapping<String, Step> {
+    ["fail"] {
+        glob = "*"
+        check = "false"
+    }
+}
+
+hooks {
+    ["pre-push"] {
+        fix = false
+        steps = linters
+    }
+}
+"#;
+
+pub const HK_PRE_PUSH_AUTOFIX: &str = r#"amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+
+local linters = new Mapping<String, Step> {
+    ["autofix"] {
+        glob = "*"
+        check = "sh -c 'echo fixed > AUTOFIX_RAN'"
+    }
+}
+
+hooks {
+    ["pre-push"] {
+        fix = false
+        steps = linters
+    }
+}
+"#;
+
+// Silence the unused-const warning for HK_PRELUDE, which exists as
+// documentation for what every HK_* fixture above starts with.
+#[allow(dead_code)]
+const _PRELUDE_ALIAS: &str = HK_PRELUDE;

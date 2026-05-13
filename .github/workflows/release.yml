@@ -105,3 +105,75 @@ jobs:
             --verify-tag \
             release/jj-hooks-*.tar.gz \
             release/jj-hooks-*.sha256
+
+  bump-tap:
+    name: Bump Homebrew tap formula
+    needs: publish
+    runs-on: ubuntu-latest
+    # Skip on pre-releases (rc/alpha/beta) — tap should track stable only.
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - name: Download release checksums
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract per-platform SHA256s
+        id: shas
+        run: |
+          set -euo pipefail
+          for slug in darwin-arm64 linux-x64 linux-arm64; do
+              file="artifacts/jj-hooks-${{ github.ref_name }}-${slug}/jj-hooks-${{ github.ref_name }}-${slug}.tar.gz.sha256"
+              sha=$(awk '{print $1}' "$file")
+              echo "${slug}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+
+      # Check out the tap repo using a PAT with `contents:write` on
+      # mattwilkinsonn/homebrew-tap. The PAT must be saved as the
+      # `HOMEBREW_TAP_TOKEN` secret on this repo.
+      - name: Checkout tap
+        uses: actions/checkout@v5
+        with:
+          repository: mattwilkinsonn/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Rewrite formula
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, os
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          shas = {
+              "darwin-arm64": "${{ steps.shas.outputs.darwin-arm64 }}",
+              "linux-x64":   "${{ steps.shas.outputs.linux-x64 }}",
+              "linux-arm64": "${{ steps.shas.outputs.linux-arm64 }}",
+          }
+          path = "tap/Formula/jj-hooks.rb"
+          with open(path) as f:
+              text = f.read()
+          # Bump version.
+          text = re.sub(r'^  version ".*"$', f'  version "{version}"', text, flags=re.M)
+          # Bump each per-slug sha256 by anchoring on its url line.
+          for slug, sha in shas.items():
+              pattern = re.compile(
+                  rf'(url\s+"[^"]*-{slug}\.tar\.gz"\s*\n\s+sha256\s+)"[^"]*"'
+              )
+              text = pattern.sub(rf'\1"{sha}"', text)
+          with open(path, "w") as f:
+              f.write(text)
+          PY
+
+      - name: Commit + push
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+              echo "nothing to bump"
+              exit 0
+          fi
+          git add Formula/jj-hooks.rb
+          git commit -m "jj-hooks ${GITHUB_REF_NAME}"
+          git push

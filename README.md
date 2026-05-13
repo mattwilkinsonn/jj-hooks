@@ -5,17 +5,13 @@ Run [pre-commit](https://pre-commit.com/), [prek](https://github.com/j178/prek),
 [hk](https://hk.jdx.dev) hooks against [jj](https://jj-vcs.github.io) bookmark
 pushes — with full support for secondary jj workspaces.
 
-## Prior art
-
-- [jj-pre-push](https://github.com/acarapetis/jj-pre-push) — the Python tool
-  that originally inspired this. `jj-hooks` adopts its bookmark-update
-  parsing strategy and broadens the runner/workspace support.
-- <https://www.aazuspan.dev/blog/automating-pre-push-checks-with-jujutsu/>
-- Discussion on <https://github.com/jj-vcs/jj/issues/405>
+Ships as two binaries: `jj-hooks` (canonical name) and `jj-hp` (shorter alias
+that's easier to type and works with shell completion). Pick the one you like;
+they're identical.
 
 ## What it does
 
-`jj-hooks push` is a drop-in replacement for `jj git push`:
+`jj-hp push` is a drop-in replacement for `jj git push`:
 
 1. Asks jj which bookmarks the push would update on the remote.
 2. For each bookmark being added or moved, creates an ephemeral detached git
@@ -25,8 +21,8 @@ pushes — with full support for secondary jj workspaces.
    `refs/heads/jj-hooks-fixup/<bookmark>` so the autofixes aren't lost.
 4. If everything passes cleanly, executes the real `jj git push`.
 
-`jj-hooks run [REVSET]` runs hooks against a revset without pushing — useful
-for "lint this change before I move on" workflows.
+`jj-hp run [REVSET]` runs hooks against a revset without pushing — useful for
+"lint this change before I move on" workflows.
 
 ## Why a worktree?
 
@@ -40,32 +36,85 @@ files but the git index lives in the primary's `.git`, so pre-commit's
 working copy is never touched, and the same code path works in both
 primary and secondary workspaces.
 
+## Prior art
+
+- [jj-pre-push](https://github.com/acarapetis/jj-pre-push) — the Python tool
+  that originally inspired this. `jj-hooks` adopts its bookmark-update parsing
+  strategy and broadens the runner support.
+- <https://www.aazuspan.dev/blog/automating-pre-push-checks-with-jujutsu/>
+- Discussion on <https://github.com/jj-vcs/jj/issues/405>
+
 ## Installation
 
+### Via cargo binstall (recommended)
+
 ```bash
+cargo binstall jj-hooks
+```
+
+This pulls a prebuilt binary from the GitHub Releases page — no compile step.
+
+### Via Homebrew tap
+
+```bash
+brew install mattwilkinsonn/tap/jj-hooks
+```
+
+### From source
+
+```bash
+jj git clone https://github.com/mattwilkinsonn/jj-hooks
 cargo install --path .
 ```
 
-Then run the interactive setup (optional but recommended):
+After install run the interactive setup (optional):
 
 ```bash
-jj-hooks init
+jj-hp init
 ```
 
 This prompts to:
 
-- Install a user-level `jj push` alias that delegates to `jj-hooks push`.
+- Install a user-level `jj push` alias that delegates to `jj-hp push`.
 - Enable `jj-hooks.advance-bookmarks` so the local bookmark automatically moves
   to the fixup commit when hooks autofix something.
+- Install jjui actions/bindings so `jj-hp push` is reachable from inside jjui.
 
-Both can be reconfigured by running `jj-hooks init` again.
+All three can be reconfigured by running `jj-hp init` again.
+
+## Shell completion
+
+`jj-hp completions <shell>` emits a clap-generated completion script. The
+script wires dynamic completers for `--bookmark` and `--remote` that shell
+out to `jj` to enumerate live values.
+
+```bash
+# zsh: add to ~/.zshrc
+eval "$(jj-hp completions zsh)"
+
+# bash: add to ~/.bashrc
+eval "$(jj-hp completions bash)"
+
+# fish: write to ~/.config/fish/completions/jj-hp.fish
+jj-hp completions fish > ~/.config/fish/completions/jj-hp.fish
+```
+
+After that, `jj-hp push -b <TAB>` will complete bookmark names from your repo
+and `jj-hp push --remote <TAB>` will complete remote names.
+
+> **Note**: completion only works for `jj-hp` directly. The `jj push` alias
+> (installed by `jj-hp init`) runs through jj's own completion script, which
+> doesn't expand user aliases — so `jj push -b <TAB>` won't complete bookmark
+> names. Use `jj-hp push -b <TAB>` instead. This is a limitation of jj's
+> completion script, not jj-hooks.
 
 ## Usage
 
 ```text
-jj-hooks push [-- JJ_GIT_PUSH_ARGS...]
-jj-hooks run  [--stage pre-commit|pre-push] [REVSET]
-jj-hooks init
+jj-hp push [-b BOOKMARK]... [--remote REMOTE] [other flags] [-- JJ_GIT_PUSH_ARGS...]
+jj-hp run  [--stage pre-commit|pre-push] [REVSET]
+jj-hp init
+jj-hp completions <bash|zsh|fish|powershell>
 ```
 
 Global flags:
@@ -75,14 +124,22 @@ Global flags:
 | `--runner <pre-commit\|prek\|lefthook\|hk>` | `JJ_HOOKS_RUNNER` | autodetect | Override runner selection |
 | `--log-level <level>` | `JJ_HOOKS_LOG` | `warn` | tracing-subscriber filter |
 
-`push` flags:
+`push` flags (mirrors `jj git push`):
 
 | Flag | Default | Effect |
 | ---- | ------- | ------ |
+| `-b/--bookmark NAME` | — | Push only this bookmark; repeatable |
+| `-r/--revision REVSET` | — | Push bookmarks pointing at these commits; repeatable |
+| `-c/--change REVSET` | — | Push these commits by creating a bookmark; repeatable |
+| `--remote NAME` | — | The remote to push to |
+| `--all` | off | Push all bookmarks (including new ones) |
+| `--tracked` | off | Push all tracked bookmarks |
+| `--deleted` | off | Push all deleted bookmarks |
+| `--allow-new` | off | Allow pushing new (untracked) bookmarks |
 | `--stage <pre-commit\|pre-push>` | `pre-push` | Which hook stage to run |
 | `--advance-bookmarks` | from config | Move local bookmarks to fixup commits on autofix |
 | `--dry-run` | off | Forwarded to `jj git push` |
-| trailing args | — | Everything after recognized flags is forwarded to `jj git push` |
+| anything after `--` | — | Forwarded verbatim to `jj git push` |
 
 `run` flags:
 
@@ -100,10 +157,12 @@ Global flags:
 3. `.pre-commit-config.yaml` / `.pre-commit-config.yml` → `pre-commit`
 
 If multiple match, `jj-hooks` errors out and asks for `--runner`. `prek` is
-never autodetected (it shares pre-commit's config file); use `--runner prek`
-or `JJ_HOOKS_RUNNER=prek` to opt in.
+never autodetected by file — it shares pre-commit's config file. Instead, if
+the autodetected runner is `pre-commit` and `prek` is on `$PATH`, `jj-hooks`
+silently uses `prek` (it's a faster drop-in). Override with `--runner pre-commit`
+to force the slower path.
 
-If no config matches, `jj-hooks push` falls through to plain `jj git push`.
+If no config matches, `jj-hp push` falls through to plain `jj git push`.
 
 ## Fixup commits
 
@@ -128,8 +187,8 @@ With `--advance-bookmarks` (or `jj-hooks.advance-bookmarks = true` in config),
 `jj-hooks` does the second sequence automatically: bookmark moves, temp
 bookmark and ref are removed.
 
-The push is still aborted whenever a fixup commit is created. Run `jj-hooks
-push` again after squashing/advancing.
+The push is still aborted whenever a fixup commit is created. Run `jj-hp push`
+again after squashing/advancing.
 
 ## Workspaces
 
@@ -150,17 +209,38 @@ All config keys live under `jj-hooks.*` in jj's user/repo config:
 `--runner` and `--stage` are command-line / env only — they belong with the
 invocation, not the config.
 
+## Using the `jj push` alias (optional)
+
+If you came from
+[jj-pre-push](https://github.com/acarapetis/jj-pre-push) or just prefer typing
+`jj push`, `jj-hp init` can wire up an alias for you:
+
+```toml
+# Added to ~/.config/jj/config.toml by `jj-hp init`
+[aliases]
+push = ["util", "exec", "--", "jj-hp", "push"]
+```
+
+After that, `jj push` works exactly like `jj-hp push`. The catch is that
+shell completion only sees `jj`'s own completion table, which doesn't expand
+user-defined aliases — so `jj push -b <TAB>` won't complete bookmark names.
+For that, fall back to `jj-hp push -b <TAB>`.
+
+The recommended workflow is to use `jj-hp` directly. The alias exists for
+muscle memory.
+
 ## Development
 
 ```bash
-just install-deps   # install pre-commit, prek, lefthook, hk (macOS via brew, Linux via uv/cargo)
+just install-deps   # install pre-commit, prek, lefthook, hk, markdownlint-cli2, actionlint
 just test           # check-deps + cargo nextest
 just ci             # fmt-check + clippy + test
 ```
 
 The test suite includes integration tests that build real jj+git repos in
 tempdirs, install local pre-commit hooks, and run the full push pipeline —
-including the secondary-workspace path.
+including the secondary-workspace path. Every supported runner (pre-commit,
+prek, lefthook, hk) has dedicated integration tests for pass/fail/autofix.
 
 ## License
 
