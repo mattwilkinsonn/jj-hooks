@@ -1,0 +1,89 @@
+name: CI
+
+"on":
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lints:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install stable
+          rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "lints"
+          save-if: "true"
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test-${{ matrix.os }}"
+          save-if: "true"
+
+      # Pre-built cargo-nextest binary from GitHub Releases — much
+      # faster than `cargo install`. Same for just (used by install-deps).
+      # jj has prebuilt binaries on its release page; install-action
+      # handles all three from the same caching layer.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just,cargo-binstall
+
+      - name: Install jj
+        uses: taiki-e/install-action@v2
+        with:
+          tool: jj
+
+      # Install all four supported hook runners (pre-commit, prek,
+      # lefthook, hk). macOS uses Homebrew; Linux uses uv for the Python
+      # backends + a curl download for lefthook + cargo for hk. See the
+      # install-deps recipe for details.
+      - name: Install Python (for uv on Linux)
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install uv (Linux only — macOS uses brew)
+        if: runner.os == 'Linux'
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install hook runners
+        run: just install-deps
+
+      - name: Add ~/.local/bin to PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: cargo nextest run
+        run: cargo nextest run --no-fail-fast

@@ -1,0 +1,33 @@
+[package]
+name = "jj-hooks"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Run pre-commit / lefthook / hk hooks against jj bookmark pushes"
+repository = "https://github.com/mattwilkinsonn/jj-hooks"
+readme = "README.md"
+
+[[bin]]
+name = "jj-hooks"
+path = "src/main.rs"
+
+[lib]
+name = "jj_hooks"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+dialoguer = { version = "0.12.0", default-features = false }
+regex = "1.12.3"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+indoc = "2.0.6"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

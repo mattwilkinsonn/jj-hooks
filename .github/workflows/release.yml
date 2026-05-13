@@ -1,0 +1,107 @@
+name: Release
+
+"on":
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write  # needed to create the GitHub Release + upload assets
+
+jobs:
+  build:
+    name: Build ${{ matrix.target_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_name: darwin-arm64
+            runs_on: macos-latest
+            rust_target: aarch64-apple-darwin
+          - target_name: linux-x64
+            runs_on: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+          - target_name: linux-arm64
+            runs_on: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install stable
+          rustup target add ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-${{ matrix.target_name }}"
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.rust_target }}
+
+      - name: Stage artifacts
+        id: stage
+        run: |
+          stage="$RUNNER_TEMP/jj-hooks-${{ github.ref_name }}-${{ matrix.target_name }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.rust_target }}/release/jj-hooks" "$stage/"
+          cp README.md LICENSE "$stage/" 2>/dev/null || true
+          echo "dir=$stage" >> "$GITHUB_OUTPUT"
+
+      # Ad-hoc codesigning on macOS so the binary doesn't get the
+      # "downloaded from internet" quarantine warning when first run.
+      # Real Developer-ID signing would require an Apple cert pair in
+      # GitHub secrets — out of scope for an MVP-stage tool.
+      - name: Codesign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign -s - "${{ steps.stage.outputs.dir }}/jj-hooks"
+
+      - name: Tar + checksum
+        id: pack
+        run: |
+          stage="${{ steps.stage.outputs.dir }}"
+          cd "$(dirname "$stage")"
+          base="$(basename "$stage")"
+          tar -czf "$base.tar.gz" "$base"
+          shasum -a 256 "$base.tar.gz" > "$base.tar.gz.sha256"
+          echo "tarball=$(dirname "$stage")/$base.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=$(dirname "$stage")/$base.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: jj-hooks-${{ github.ref_name }}-${{ matrix.target_name }}
+          path: |
+            ${{ steps.pack.outputs.tarball }}
+            ${{ steps.pack.outputs.checksum }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} release/ \;
+          ls -la release
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "Release ${{ github.ref_name }}." \
+            --verify-tag \
+            release/jj-hooks-*.tar.gz \
+            release/jj-hooks-*.sha256
