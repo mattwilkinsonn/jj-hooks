@@ -21,6 +21,7 @@ install-deps:
             uv tool install pre-commit
             uv tool install prek
 
+            lefthook_version=2.1.6
             arch="$(uname -m)"
             case "$arch" in
                 x86_64)  lefthook_arch=x86_64 ;;
@@ -30,7 +31,9 @@ install-deps:
                     exit 1
                     ;;
             esac
-            curl -fsSL "https://github.com/evilmartians/lefthook/releases/latest/download/lefthook_linux_${lefthook_arch}" \
+            # lefthook's release assets are versioned and use capitalized
+            # `Linux` in the filename — e.g. lefthook_2.1.6_Linux_x86_64.
+            curl -fsSL "https://github.com/evilmartians/lefthook/releases/download/v${lefthook_version}/lefthook_${lefthook_version}_Linux_${lefthook_arch}" \
                 -o "$HOME/.local/bin/lefthook"
             chmod +x "$HOME/.local/bin/lefthook"
 
