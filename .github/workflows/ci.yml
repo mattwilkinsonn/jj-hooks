@@ -79,7 +79,9 @@ jobs:
           esac
           url="https://github.com/jj-vcs/jj/releases/download/${jj_version}/jj-${jj_version}-${triple}.tar.gz"
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL "$url" | tar -xz -C "$HOME/.local/bin" jj
+          # Tarball layout is ./jj plus README/LICENSE. Strip the leading
+          # ./ and pull only the binary.
+          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$HOME/.local/bin" ./jj
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/jj" --version
 
