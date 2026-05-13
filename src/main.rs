@@ -95,12 +95,20 @@ fn real_main(cli: Cli) -> Result<ExitCode, JjHooksError> {
                 .and_then(|root| Runner::autodetect(&root).ok().flatten());
             let mut prompter = InteractivePrompter;
             let plan = init::plan(detected, &mut prompter)?;
-            let outcome = init::apply(&plan, None)?;
+            let outcome = init::apply(&plan, None, None)?;
             if outcome.alias_set {
                 eprintln!("jj-hooks: installed `aliases.push` = jj-hooks push");
             }
             if outcome.advance_bookmarks_set {
                 eprintln!("jj-hooks: set `jj-hooks.advance-bookmarks = true`");
+            }
+            let jjui = outcome.jjui_actions_added;
+            if jjui.added_jj_push
+                || jjui.added_jj_push_selected
+                || jjui.added_binding_x_p
+                || jjui.added_binding_x_p_caps
+            {
+                eprintln!("jj-hooks: merged jjui actions/bindings into jjui config");
             }
             Ok(ExitCode::SUCCESS)
         }
