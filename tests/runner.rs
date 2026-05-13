@@ -1,4 +1,4 @@
-use jj_hooks::runner::{Runner, Stage, hook_command, lefthook_command};
+use jj_hooks::runner::{Runner, Stage, hook_command, lefthook_command, prefer_prek_when_available};
 use tempfile::TempDir;
 
 #[test]
@@ -143,4 +143,48 @@ fn autodetect_ambiguous_errors() {
     assert!(msg.contains("multiple"), "{msg}");
     assert!(msg.contains("lefthook"), "{msg}");
     assert!(msg.contains("pre-commit"), "{msg}");
+}
+
+#[test]
+fn prefer_prek_swaps_pre_commit_when_available() {
+    assert_eq!(
+        prefer_prek_when_available(Runner::PreCommit, true),
+        Runner::Prek
+    );
+}
+
+#[test]
+fn prefer_prek_leaves_pre_commit_when_prek_missing() {
+    assert_eq!(
+        prefer_prek_when_available(Runner::PreCommit, false),
+        Runner::PreCommit
+    );
+}
+
+#[test]
+fn prefer_prek_does_not_swap_lefthook() {
+    assert_eq!(
+        prefer_prek_when_available(Runner::Lefthook, true),
+        Runner::Lefthook
+    );
+}
+
+#[test]
+fn prefer_prek_does_not_swap_hk() {
+    assert_eq!(
+        prefer_prek_when_available(Runner::Hk, true),
+        Runner::Hk
+    );
+}
+
+#[test]
+fn prefer_prek_is_idempotent_on_prek() {
+    assert_eq!(
+        prefer_prek_when_available(Runner::Prek, true),
+        Runner::Prek
+    );
+    assert_eq!(
+        prefer_prek_when_available(Runner::Prek, false),
+        Runner::Prek
+    );
 }

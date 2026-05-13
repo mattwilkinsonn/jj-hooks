@@ -87,9 +87,9 @@ Global flags:
 
 `jj-hooks` probes the workspace root for these files, in order:
 
-1. `lefthook.yml` / `lefthook.yaml` / `.lefthook.yml` / `.lefthook.yaml` → `lefthook`
-2. `.pre-commit-config.yaml` / `.pre-commit-config.yml` → `pre-commit`
-3. `hk.pkl` → `hk`
+1. `hk.pkl` → `hk`
+2. `lefthook.yml` / `lefthook.yaml` / `.lefthook.yml` / `.lefthook.yaml` → `lefthook`
+3. `.pre-commit-config.yaml` / `.pre-commit-config.yml` → `pre-commit`
 
 If multiple match, `jj-hooks` errors out and asks for `--runner`. `prek` is
 never autodetected (it shares pre-commit's config file); use `--runner prek`

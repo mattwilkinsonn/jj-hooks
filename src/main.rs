@@ -112,9 +112,14 @@ fn resolve_runner(
     workspace_root: &std::path::Path,
 ) -> Result<Option<Runner>, JjHooksError> {
     if let Some(r) = flag {
+        // User asked for a specific runner — honor it exactly.
         return Ok(Some(r.into()));
     }
-    Runner::autodetect(workspace_root)
+    let autodetected = Runner::autodetect(workspace_root)?;
+    Ok(autodetected.map(|r| {
+        // prek is a faster drop-in for pre-commit; prefer it when present.
+        jj_hooks::runner::prefer_prek_when_available(r, jj_hooks::runner::prek_on_path())
+    }))
 }
 
 fn advance_bookmarks_from_config(jj: &JjCli) -> bool {

@@ -31,6 +31,7 @@ impl Runner {
     /// for a single match, Ok(None) for no match, Err for ambiguous.
     pub fn autodetect(root: &Path) -> Result<Option<Runner>> {
         let candidates = [
+            (Runner::Hk, &["hk.pkl"][..]),
             (
                 Runner::Lefthook,
                 &[
@@ -44,7 +45,6 @@ impl Runner {
                 Runner::PreCommit,
                 &[".pre-commit-config.yaml", ".pre-commit-config.yml"][..],
             ),
-            (Runner::Hk, &["hk.pkl"][..]),
         ];
 
         let mut found: Vec<Runner> = Vec::new();
@@ -116,4 +116,33 @@ pub fn lefthook_command(stage: Stage, files: &[PathBuf]) -> Vec<String> {
         argv.push(f.to_string_lossy().into_owned());
     }
     argv
+}
+
+/// Swap `Runner::PreCommit` for `Runner::Prek` when prek is on the user's
+/// PATH. prek is a drop-in pre-commit replacement that's much faster, so
+/// users who happen to have both installed should get the faster one
+/// automatically. An explicit `--runner pre-commit` short-circuits this
+/// (callers should only invoke `prefer_prek_when_available` on the
+/// autodetected result, not on a user-supplied override).
+pub fn prefer_prek_when_available(autodetected: Runner, prek_present: bool) -> Runner {
+    match (autodetected, prek_present) {
+        (Runner::PreCommit, true) => Runner::Prek,
+        _ => autodetected,
+    }
+}
+
+/// Probe `$PATH` for the `prek` binary.
+pub fn prek_on_path() -> bool {
+    which("prek").is_some()
+}
+
+fn which(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
