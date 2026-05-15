@@ -177,3 +177,26 @@ jobs:
           git add Formula/jj-hooks.rb
           git commit -m "jj-hooks ${GITHUB_REF_NAME}"
           git push
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: [publish, bump-tap]
+    runs-on: ubuntu-latest
+    # Skip on pre-releases (rc/alpha/beta) so we don't burn a version
+    # number on crates.io for something users shouldn't binstall.
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install stable
+
+      # `cargo publish` is irreversible (versions can be yanked but never
+      # republished), so it goes last in the release sequence — only
+      # after the GitHub Release exists and the Homebrew formula bump
+      # succeeds. If any earlier step fails, this one doesn't run and
+      # the version number is preserved for a retry.
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
