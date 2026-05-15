@@ -61,6 +61,12 @@ jobs:
           - os: ubuntu-latest
           - os: macos-latest
     runs-on: ${{ matrix.os }}
+    # uv reads these to decide where `uv tool install` puts binaries +
+    # data. Pinning them under ~/.local means everything landed by
+    # install-deps lives in one cacheable directory tree.
+    env:
+      XDG_BIN_HOME: ${{ github.workspace }}/.tools-bin
+      XDG_DATA_HOME: ${{ github.workspace }}/.tools-data
     steps:
       - uses: actions/checkout@v5
 
@@ -80,11 +86,28 @@ jobs:
         with:
           tool: cargo-nextest,just,cargo-binstall
 
+      # Cache every tool that install-deps installs (jj, lefthook,
+      # actionlint, pkl, hk, pre-commit, prek, markdownlint-cli2). We key
+      # on the Justfile + workflow file hashes so any version bump in
+      # either invalidates the cache. Skip install-deps + the prebuilt
+      # jj download entirely on a hit.
+      - name: Cache hook tools (Linux)
+        if: runner.os == 'Linux'
+        id: tools-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.XDG_BIN_HOME }}
+            ${{ env.XDG_DATA_HOME }}
+          key: tools-${{ runner.os }}-${{ hashFiles('Justfile', '.github/workflows/ci.yml') }}
+
       # jj has no install-action manifest yet, and the `jj` crate on
       # crates.io is a squatter that compile-errors pointing at jj-cli.
       # Just download the prebuilt tarball from the jj-vcs/jj release
-      # page directly — ~5s vs multi-minute compile.
+      # page directly — ~5s vs multi-minute compile. macOS path always
+      # runs (no cache); Linux skips when the cache hit covers it.
       - name: Install jj from prebuilt tarball
+        if: runner.os == 'macOS' || steps.tools-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           jj_version=v0.41.0
@@ -99,33 +122,30 @@ jobs:
                   ;;
           esac
           url="https://github.com/jj-vcs/jj/releases/download/${jj_version}/jj-${jj_version}-${triple}.tar.gz"
-          mkdir -p "$HOME/.local/bin"
-          # Tarball layout is ./jj plus README/LICENSE. Strip the leading
-          # ./ and pull only the binary.
-          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$HOME/.local/bin" ./jj
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/jj" --version
+          # On Linux send to the cached XDG_BIN_HOME; on macOS use ~/.local/bin
+          # since brew owns macOS install paths and we don't cache there.
+          dest="${XDG_BIN_HOME:-$HOME/.local/bin}"
+          mkdir -p "$dest"
+          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$dest" ./jj
+          "$dest/jj" --version
 
-      # Install all four supported hook runners (pre-commit, prek,
-      # lefthook, hk). macOS uses Homebrew; Linux uses uv for the Python
-      # backends + a curl download for lefthook + cargo for hk. See the
-      # install-deps recipe for details.
       - name: Install Python (for uv on Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.tools-cache.outputs.cache-hit != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
       - name: Install uv (Linux only — macOS uses brew)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.tools-cache.outputs.cache-hit != 'true'
         uses: astral-sh/setup-uv@v6
 
       - name: Install hook runners
+        if: runner.os == 'macOS' || steps.tools-cache.outputs.cache-hit != 'true'
         run: just install-deps
 
-      - name: Add ~/.local/bin to PATH (Linux)
+      - name: Add tool dirs to PATH (Linux)
         if: runner.os == 'Linux'
-        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        run: echo "$XDG_BIN_HOME" >> "$GITHUB_PATH"
 
       - name: cargo nextest run
         run: cargo nextest run --no-fail-fast

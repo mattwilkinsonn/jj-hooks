@@ -30,6 +30,13 @@ use crate::runner::{Runner, Stage};
 /// code. Both `bin/jj-hooks` and `bin/jj-hp` are trivial wrappers around
 /// this function.
 pub fn run() -> ExitCode {
+    // Handle dynamic completion requests *before* anything else. When the
+    // shell calls us back with `COMPLETE=<shell>` set (via the script
+    // emitted by the `completions` subcommand), CompleteEnv runs the
+    // ArgValueCompleter callbacks and exits — we never reach `Cli::parse`.
+    use clap::CommandFactory;
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
 
     let _ = tracing_subscriber::fmt()
@@ -142,10 +149,12 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
 
         Command::Completions { shell } => {
             use clap::CommandFactory;
-            let mut cmd = Cli::command();
-            // We pick the binary name dynamically from argv[0] so the
-            // generated script targets whichever name the user invoked
-            // (`jj-hooks` vs `jj-hp`).
+            use clap_complete::env::EnvCompleter;
+            use clap_complete::env::{Bash, Elvish, Fish, Powershell, Zsh};
+
+            let cmd = Cli::command();
+            // Pick the binary name dynamically from argv[0] so the script
+            // targets whichever name the user invoked (`jj-hooks` vs `jj-hp`).
             let bin_name = std::env::args()
                 .next()
                 .and_then(|arg0| {
@@ -154,7 +163,35 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
                         .map(|s| s.to_string_lossy().into_owned())
                 })
                 .unwrap_or_else(|| "jj-hp".into());
-            clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+
+            // Write the env-driven registration script (NOT the static
+            // completion script). Static scripts can't fire ArgValueCompleter
+            // callbacks, so bookmark / remote completion would silently fall
+            // through to file completion. The env-driven script makes the
+            // shell call us back with `COMPLETE=<shell>` set, which the
+            // CompleteEnv::complete() call at the top of run() handles.
+            let mut out = std::io::stdout();
+            let result =
+                match shell {
+                    clap_complete::Shell::Bash => Bash
+                        .write_registration("COMPLETE", &bin_name, &bin_name, &bin_name, &mut out),
+                    clap_complete::Shell::Zsh => Zsh
+                        .write_registration("COMPLETE", &bin_name, &bin_name, &bin_name, &mut out),
+                    clap_complete::Shell::Fish => Fish
+                        .write_registration("COMPLETE", &bin_name, &bin_name, &bin_name, &mut out),
+                    clap_complete::Shell::PowerShell => Powershell
+                        .write_registration("COMPLETE", &bin_name, &bin_name, &bin_name, &mut out),
+                    clap_complete::Shell::Elvish => Elvish
+                        .write_registration("COMPLETE", &bin_name, &bin_name, &bin_name, &mut out),
+                    _ => {
+                        eprintln!("jj-hooks: unsupported shell for dynamic completion");
+                        return Ok(ExitCode::from(2));
+                    }
+                };
+            // Use cmd to satisfy the unused warning. The script writers
+            // above don't need it — they reference the binary by name only.
+            let _ = cmd;
+            result.map_err(JjHooksError::Io)?;
             Ok(ExitCode::SUCCESS)
         }
     }

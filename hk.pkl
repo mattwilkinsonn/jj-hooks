@@ -31,7 +31,10 @@ hooks {
         steps = fastLinters
     }
     ["pre-push"] {
-        fix = false
+        // Auto-apply formatter fixes (cargo_fmt, markdown_lint) so the
+        // jj-hooks push pipeline picks them up as a fixup commit. Linters
+        // without a fix command (cargo_clippy, actionlint) just check.
+        fix = true
         steps = slowLinters
     }
     ["fix"] {

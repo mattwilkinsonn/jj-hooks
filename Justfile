@@ -16,8 +16,12 @@ install-deps:
             brew install pre-commit prek lefthook hk markdownlint-cli2 actionlint
             ;;
         Linux)
-            mkdir -p "$HOME/.local/bin"
-            export PATH="$HOME/.local/bin:$PATH"
+            # Respect XDG_BIN_HOME when set (CI sets it so all installed
+            # tools live under one cacheable dir). Default to ~/.local/bin
+            # for local dev installs.
+            bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
+            mkdir -p "$bin_dir"
+            export PATH="$bin_dir:$PATH"
 
             uv tool install pre-commit
             uv tool install prek
@@ -35,30 +39,45 @@ install-deps:
             # lefthook's release assets are versioned and use capitalized
             # `Linux` in the filename — e.g. lefthook_2.1.6_Linux_x86_64.
             curl -fsSL "https://github.com/evilmartians/lefthook/releases/download/v${lefthook_version}/lefthook_${lefthook_version}_Linux_${lefthook_arch}" \
-                -o "$HOME/.local/bin/lefthook"
-            chmod +x "$HOME/.local/bin/lefthook"
+                -o "$bin_dir/lefthook"
+            chmod +x "$bin_dir/lefthook"
 
             # actionlint ships as a prebuilt tarball. Extract just the
-            # binary into ~/.local/bin.
+            # binary into the chosen bin dir.
             actionlint_version=1.7.12
             curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${actionlint_version}/actionlint_${actionlint_version}_linux_${actionlint_arch}.tar.gz" \
-                | tar -xz -C "$HOME/.local/bin" actionlint
+                | tar -xz -C "$bin_dir" actionlint
 
-            # markdownlint-cli2 lives on npm. Assumes node + npm are on
-            # PATH (preinstalled on GitHub Linux runners; users may need
-            # `apt install nodejs npm` locally).
+            # pkl is a single-file binary. hk shells out to it to read
+            # hk.pkl configs — without pkl on PATH, hk silently fails to
+            # parse and rejects everything as "no config".
+            pkl_version=0.31.1
+            case "$arch" in
+                x86_64)  pkl_arch=amd64 ;;
+                aarch64) pkl_arch=aarch64 ;;
+            esac
+            curl -fsSL "https://github.com/apple/pkl/releases/download/${pkl_version}/pkl-linux-${pkl_arch}" \
+                -o "$bin_dir/pkl"
+            chmod +x "$bin_dir/pkl"
+
+            # markdownlint-cli2 lives on npm. We force the install prefix
+            # to the chosen bin dir's parent so npm drops the executable
+            # right next to the rest of our tools (npm puts binaries in
+            # <prefix>/bin).
             if command -v npm >/dev/null 2>&1; then
+                npm config set prefix "$(dirname "$bin_dir")"
                 npm install -g markdownlint-cli2
             else
                 echo "warn: npm not on PATH; install Node.js to get markdownlint-cli2" >&2
             fi
 
             # cargo binstall pulls prebuilt artifacts (much faster than
-            # building from source). Bootstrap it if it's missing.
+            # building from source). Bootstrap it if it's missing. We
+            # install hk into the cacheable bin dir.
             if ! command -v cargo-binstall >/dev/null 2>&1; then
                 cargo install cargo-binstall
             fi
-            cargo binstall -y hk
+            cargo binstall -y --install-path "$bin_dir" hk
             ;;
         *)
             echo "unsupported OS: $(uname -s)" >&2
@@ -71,7 +90,7 @@ check-deps:
     #!/usr/bin/env bash
     set -euo pipefail
     missing=()
-    for bin in pre-commit prek lefthook hk markdownlint-cli2 actionlint; do
+    for bin in pre-commit prek lefthook hk pkl markdownlint-cli2 actionlint; do
         if ! command -v "$bin" >/dev/null 2>&1; then
             missing+=("$bin")
         fi
