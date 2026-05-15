@@ -165,9 +165,9 @@ build-release:
     cargo build --release --bin jj-hooks --bin jj-hp
 
 # Cut a release. Bumps Cargo.toml, refreshes Cargo.lock, commits the
-# bump on top of @, tags @- with the version, and exports tags to git.
-# Stops short of pushing -- run `jj git push` to push the commit and
-# `jj-push-tags vX.Y.Z` to push the tag (or `jj-push-tags --all`).
+# bump on top of @, tags @- with the version, advances the local `main`
+# bookmark to the release commit, and pushes both the commit and the
+# tag to origin. Triggers the release.yml workflow on push.
 #
 # Usage: just release v0.1.0
 release VERSION:
@@ -184,6 +184,14 @@ release VERSION:
     # Require a clean @ -- release commits should not include unrelated work.
     if [ -n "$(jj diff --summary --ignore-working-copy 2>/dev/null)" ]; then
         echo "error: working copy @ has uncommitted changes; finalize them first" >&2
+        exit 1
+    fi
+
+    # Require `main` to be an ancestor of `@` so the release commit lands
+    # on top of main. Otherwise advancing main to @- after the commit
+    # would move it backwards or sideways onto an unrelated branch.
+    if ! jj --ignore-working-copy log -r "main & ::@" -T 'change_id' --no-graph 2>/dev/null | grep -q .; then
+        echo "error: @ is not a descendant of main (run \`jj rebase -d main\` first)" >&2
         exit 1
     fi
 
@@ -213,11 +221,24 @@ release VERSION:
     jj tag set "$version" -r @-
     echo
 
+    # Move the local `main` bookmark forward to the release commit so
+    # `jj git push` pushes the right ref.
+    echo "Advancing main to the release commit..."
+    jj bookmark set main -r @-
+    echo
+
     echo "Exporting refs to git..."
     jj --ignore-working-copy git export >/dev/null 2>&1 || true
     echo
 
-    echo "Done. To publish:"
-    echo "  jj git push           # push the release-bump commit"
-    echo "  jj-push-tags $version # push the tag (triggers release.yml)"
+    echo "Pushing main..."
+    jj git push -b main
+    echo
+
+    echo "Pushing tag $version (triggers release.yml)..."
+    jj-push-tags "$version"
+    echo
+
+    echo "Done. Watch the release workflow:"
+    echo "  https://github.com/mattwilkinsonn/jj-hooks/actions/workflows/release.yml"
 
