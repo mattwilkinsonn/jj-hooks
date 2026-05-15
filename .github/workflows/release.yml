@@ -39,8 +39,8 @@ jobs:
         with:
           shared-key: "release-${{ matrix.target_name }}"
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.rust_target }}
+      - name: Build release binaries
+        run: cargo build --release --bin jj-hooks --bin jj-hp --target ${{ matrix.rust_target }}
 
       - name: Stage artifacts
         id: stage
@@ -48,6 +48,7 @@ jobs:
           stage="$RUNNER_TEMP/jj-hooks-${{ github.ref_name }}-${{ matrix.target_name }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.rust_target }}/release/jj-hooks" "$stage/"
+          cp "target/${{ matrix.rust_target }}/release/jj-hp" "$stage/"
           cp README.md LICENSE "$stage/" 2>/dev/null || true
           echo "dir=$stage" >> "$GITHUB_OUTPUT"
 
@@ -57,7 +58,9 @@ jobs:
       # GitHub secrets — out of scope for an MVP-stage tool.
       - name: Codesign (macOS)
         if: runner.os == 'macOS'
-        run: codesign -s - "${{ steps.stage.outputs.dir }}/jj-hooks"
+        run: |
+          codesign -s - "${{ steps.stage.outputs.dir }}/jj-hooks"
+          codesign -s - "${{ steps.stage.outputs.dir }}/jj-hp"
 
       - name: Tar + checksum
         id: pack
