@@ -37,7 +37,7 @@ install-deps:
                     ;;
             esac
             # lefthook's release assets are versioned and use capitalized
-            # `Linux` in the filename — e.g. lefthook_2.1.6_Linux_x86_64.
+            # `Linux` in the filename -- e.g. lefthook_2.1.6_Linux_x86_64.
             curl -fsSL "https://github.com/evilmartians/lefthook/releases/download/v${lefthook_version}/lefthook_${lefthook_version}_Linux_${lefthook_arch}" \
                 -o "$bin_dir/lefthook"
             chmod +x "$bin_dir/lefthook"
@@ -49,7 +49,7 @@ install-deps:
                 | tar -xz -C "$bin_dir" actionlint
 
             # pkl is a single-file binary. hk shells out to it to read
-            # hk.pkl configs — without pkl on PATH, hk silently fails to
+            # hk.pkl configs -- without pkl on PATH, hk silently fails to
             # parse and rejects everything as "no config".
             pkl_version=0.31.1
             case "$arch" in
@@ -166,7 +166,7 @@ build-release:
 
 # Cut a release. Bumps Cargo.toml, refreshes Cargo.lock, commits the
 # bump on top of @, tags @- with the version, and exports tags to git.
-# Stops short of pushing — run `jj git push` to push the commit and
+# Stops short of pushing -- run `jj git push` to push the commit and
 # `jj-push-tags vX.Y.Z` to push the tag (or `jj-push-tags --all`).
 #
 # Usage: just release v0.1.0
@@ -181,7 +181,7 @@ release VERSION:
     fi
     bare="${version#v}"
 
-    # Require a clean @ — release commits should not include unrelated work.
+    # Require a clean @ -- release commits should not include unrelated work.
     if [ -n "$(jj diff --summary --ignore-working-copy 2>/dev/null)" ]; then
         echo "error: working copy @ has uncommitted changes; finalize them first" >&2
         exit 1
@@ -197,23 +197,23 @@ release VERSION:
         exit 1
     fi
 
-    echo "Setting package version to $bare…"
+    echo "Setting package version to $bare..."
     cargo set-version "$bare"
     echo
 
-    echo "Updating Cargo.lock…"
+    echo "Updating Cargo.lock..."
     cargo update --workspace
     echo
 
-    echo "Committing release bump as a new jj change on top of @…"
+    echo "Committing release bump as a new jj change on top of @..."
     jj commit -m "release: $version"
     echo
 
-    echo "Tagging @- with $version…"
+    echo "Tagging @- with $version..."
     jj tag set "$version" -r @-
     echo
 
-    echo "Exporting refs to git…"
+    echo "Exporting refs to git..."
     jj --ignore-working-copy git export >/dev/null 2>&1 || true
     echo
 
