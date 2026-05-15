@@ -143,8 +143,7 @@ jobs:
         if: runner.os == 'macOS' || steps.tools-cache.outputs.cache-hit != 'true'
         run: just install-deps
 
-      - name: Add tool dirs to PATH (Linux)
-        if: runner.os == 'Linux'
+      - name: Add tool dirs to PATH
         run: echo "$XDG_BIN_HOME" >> "$GITHUB_PATH"
 
       - name: cargo nextest run
