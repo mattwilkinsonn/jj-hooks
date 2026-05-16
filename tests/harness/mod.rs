@@ -204,6 +204,56 @@ impl TestRepo {
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
 
+    /// True iff jj has a commit with this commit_id in its view. After the
+    /// auto-fixup pipeline we delete the temp git ref, but the commit
+    /// stays in jj's commit graph and is still addressable by hash —
+    /// this checks exactly that.
+    pub fn jj_knows_commit(&self, commit_id: &str) -> bool {
+        let out = capture_jj(
+            &self.primary,
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                commit_id,
+                "-T",
+                "commit_id",
+                "--ignore-working-copy",
+            ],
+        );
+        out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == commit_id
+    }
+
+    /// commit_id pointed to by the most recent fixup commit reachable
+    /// from `bookmark` (the one that lives at `bookmark`'s parent after
+    /// the fixup pipeline runs). Used by tests that need to find the
+    /// fixup commit without going through a git ref.
+    pub fn fixup_commit_for(&self, bookmark: &str) -> Option<String> {
+        // The fixup commit's description is `jj-hooks: autofixes for <name>`
+        // (per build_fixup_commit). Match by substring — globs trip on
+        // the `:` and the space.
+        let revset = format!("description(substring:'jj-hooks: autofixes for {bookmark}')");
+        let out = capture_jj(
+            &self.primary,
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                &revset,
+                "-T",
+                "commit_id ++ \"\\n\"",
+                "--ignore-working-copy",
+                "--limit",
+                "1",
+            ],
+        );
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if s.is_empty() { None } else { Some(s) }
+    }
+
     /// Add a secondary workspace; returns its path.
     pub fn add_secondary(&self, name: &str) -> PathBuf {
         let path = self.tmp.path().join(name);

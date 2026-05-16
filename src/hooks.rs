@@ -83,6 +83,22 @@ pub fn run_for_update(
     if fixup_commit.is_some() {
         // Make jj aware of the new commit.
         jj.run(&["git", "import"])?;
+
+        // jj git import created a `jj-hooks-fixup/<bookmark>` jj bookmark
+        // from the underlying refs/heads/jj-hooks-fixup/<bookmark> ref.
+        // Clean both up immediately — the user almost always wants to
+        // either squash the fixup into the parent or move their bookmark
+        // forward themselves, not have a stale temp bookmark lying
+        // around. The commit stays addressable by hash via `jj log`,
+        // `jj show`, `jj squash --from <hash>` etc. since jj tracks it
+        // in its own commit graph independent of the ref.
+        let temp_bookmark = fixup_bookmark(&update.bookmark);
+        // `jj bookmark forget` removes the jj bookmark, but in a
+        // secondary workspace it leaves the underlying refs/heads/<name>
+        // ref alive in the primary's git dir. Explicitly delete the
+        // git ref ourselves so the cleanup is uniform.
+        let _ = jj.run(&["bookmark", "forget", &temp_bookmark]);
+        let _ = delete_git_ref(primary_git_dir, &fixup_ref(&update.bookmark));
     }
 
     Ok(HookOutcome {
@@ -205,6 +221,26 @@ pub fn fixup_ref(bookmark: &str) -> String {
 /// The jj bookmark name corresponding to `fixup_ref`.
 pub fn fixup_bookmark(bookmark: &str) -> String {
     format!("jj-hooks-fixup/{bookmark}")
+}
+
+/// Delete a git ref in the given git dir, ignoring "ref doesn't exist"
+/// failures. Used to clean up the temp `refs/heads/jj-hooks-fixup/<name>`
+/// after `jj git import` + `jj bookmark forget` from a secondary
+/// workspace (where forget leaves the underlying ref alive).
+fn delete_git_ref(git_dir: &Path, ref_name: &str) -> Result<()> {
+    let out = Command::new("git")
+        .arg(format!("--git-dir={}", git_dir.display()))
+        .args(["update-ref", "-d", ref_name])
+        .output()?;
+    if !out.status.success() {
+        // Treat any failure as best-effort: if the ref didn't exist,
+        // that's the desired state already.
+        tracing::debug!(
+            "git update-ref -d {ref_name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {

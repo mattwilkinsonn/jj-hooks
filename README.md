@@ -17,8 +17,8 @@ they're identical.
 2. For each bookmark being added or moved, creates an ephemeral detached git
    worktree at the target commit and runs the configured hook backend there.
 3. If hooks fail or modify files, the push is aborted. Modifications get
-   committed as a fixup commit anchored at
-   `refs/heads/jj-hooks-fixup/<bookmark>` so the autofixes aren't lost.
+   committed as a fixup commit whose hash is printed so you can `jj squash`
+   the fixes into your target or inspect them with `jj show`.
 4. If everything passes cleanly, executes the real `jj git push`.
 
 `jj-hp run [REVSET]` runs hooks against a revset without pushing — useful for
@@ -168,26 +168,30 @@ If no config matches, `jj-hp push` falls through to plain `jj git push`.
 
 When hooks modify files in the ephemeral worktree, `jj-hooks` stages them,
 writes a tree, builds a commit with the bookmark's current target as parent,
-and anchors that commit under `refs/heads/jj-hooks-fixup/<bookmark>`. Then it
-runs `jj git import` so jj sees the new commit as a `jj-hooks-fixup/<name>`
-bookmark.
+and anchors that commit under `refs/heads/jj-hooks-fixup/<bookmark>` just
+long enough for `jj git import` to pick it up. Then it deletes both the
+temp jj bookmark and the underlying git ref — the commit itself stays
+fully addressable by hash in jj's commit graph.
 
-By default the user's real bookmark stays put — you decide whether to squash
-the fixup into the target or move the bookmark yourself:
+The output of a push that produced a fixup looks like this:
+
+```text
+jj-hooks: Move forward main from abc12345 to def67890: hooks modified files (fixup commit 0123abcd...)
+jj-hooks: aborting push
+```
+
+Copy the `0123abcd...` and decide what to do with it:
 
 ```bash
-jj log -r 'jj-hooks-fixup/main | main'   # inspect
-jj squash --from jj-hooks-fixup/main --into main
-# or
-jj bookmark set main -r jj-hooks-fixup/main --allow-backwards
-jj bookmark forget jj-hooks-fixup/main
+jj log -r 0123abcd      # inspect the fixup
+jj squash --from 0123abcd --into main      # fold the fixes into main
 ```
 
 With `--advance-bookmarks` (or `jj-hooks.advance-bookmarks = true` in config),
-`jj-hooks` does the second sequence automatically: bookmark moves, temp
-bookmark and ref are removed.
+`jj-hooks` advances the local bookmark to the fixup commit automatically —
+re-run `jj-hp push` to actually push the fixed version.
 
-The push is still aborted whenever a fixup commit is created. Run `jj-hp push`
+The push is always aborted when a fixup commit is created. Run `jj-hp push`
 again after squashing/advancing.
 
 ## Workspaces

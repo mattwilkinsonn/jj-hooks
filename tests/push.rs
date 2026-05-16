@@ -132,13 +132,19 @@ fn hook_autofix_creates_fixup_ref_and_aborts_push() {
 
     // Remote did not move.
     assert_eq!(repo.remote_commit("main"), remote_before);
-    // Fixup ref should exist for `main`.
-    let fixup_refs = repo.refs_matching("refs/heads/jj-hooks-fixup/*");
+    // The temp git ref + jj bookmark should both be gone after
+    // post-import cleanup. The fixup commit itself stays addressable
+    // by hash via jj_knows_commit.
     assert!(
-        fixup_refs
-            .iter()
-            .any(|r| r == "refs/heads/jj-hooks-fixup/main"),
-        "expected fixup ref for main, got {fixup_refs:?}"
+        repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
+        "temp fixup ref should be cleaned up after import"
+    );
+    let fixup = repo
+        .fixup_commit_for("main")
+        .expect("fixup commit should be findable by description");
+    assert!(
+        repo.jj_knows_commit(&fixup),
+        "jj should still see the fixup commit even with no ref pointing at it"
     );
     // Local bookmark should not have advanced (default behavior).
     assert_eq!(repo.commit_id_of("main"), local_main_before);
@@ -213,13 +219,16 @@ fn hook_autofix_from_secondary_workspace() {
     );
     assert!(!out.status.success(), "{}", show(&out));
 
-    let fixup_refs = repo.refs_matching("refs/heads/jj-hooks-fixup/*");
+    // Temp ref + jj bookmark should be gone post-import. Fixup commit
+    // itself stays addressable by hash.
     assert!(
-        fixup_refs
-            .iter()
-            .any(|r| r == "refs/heads/jj-hooks-fixup/main"),
-        "expected fixup ref for main, got {fixup_refs:?}"
+        repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
+        "temp fixup ref should be cleaned up after import"
     );
+    let fixup = repo
+        .fixup_commit_for("main")
+        .expect("fixup commit should be findable by description");
+    assert!(repo.jj_knows_commit(&fixup));
 }
 
 #[test]
@@ -365,10 +374,13 @@ fn prek_hook_autofix_creates_fixup_ref() {
     let out = repo.jj_hooks(&["--runner", "prek", "push", "-b", "main"]);
     assert!(!out.status.success(), "{}", show(&out));
     assert!(
-        repo.refs_matching("refs/heads/jj-hooks-fixup/*")
-            .iter()
-            .any(|r| r == "refs/heads/jj-hooks-fixup/main")
+        repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
+        "temp fixup ref should be cleaned up after import"
     );
+    let fixup = repo
+        .fixup_commit_for("main")
+        .expect("fixup commit should be findable by description");
+    assert!(repo.jj_knows_commit(&fixup));
 }
 
 // -- lefthook ---------------------------------------------------------------
@@ -423,10 +435,13 @@ fn lefthook_hook_autofix_creates_fixup_ref() {
     let out = repo.jj_hooks(&["push", "-b", "main"]);
     assert!(!out.status.success(), "{}", show(&out));
     assert!(
-        repo.refs_matching("refs/heads/jj-hooks-fixup/*")
-            .iter()
-            .any(|r| r == "refs/heads/jj-hooks-fixup/main")
+        repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
+        "temp fixup ref should be cleaned up after import"
     );
+    let fixup = repo
+        .fixup_commit_for("main")
+        .expect("fixup commit should be findable by description");
+    assert!(repo.jj_knows_commit(&fixup));
 }
 
 // -- hk ---------------------------------------------------------------------
@@ -481,8 +496,11 @@ fn hk_hook_autofix_creates_fixup_ref() {
     let out = repo.jj_hooks(&["push", "-b", "main"]);
     assert!(!out.status.success(), "{}", show(&out));
     assert!(
-        repo.refs_matching("refs/heads/jj-hooks-fixup/*")
-            .iter()
-            .any(|r| r == "refs/heads/jj-hooks-fixup/main")
+        repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
+        "temp fixup ref should be cleaned up after import"
     );
+    let fixup = repo
+        .fixup_commit_for("main")
+        .expect("fixup commit should be findable by description");
+    assert!(repo.jj_knows_commit(&fixup));
 }

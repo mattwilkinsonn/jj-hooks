@@ -100,10 +100,9 @@ pub fn maybe_advance_bookmarks(
                 commit,
                 "--allow-backwards",
             ])?;
-            let temp = crate::hooks::fixup_bookmark(&update.bookmark);
-            // Forget the temp bookmark (don't delete the underlying ref —
-            // forget just makes jj stop tracking the bookmark).
-            let _ = jj.run(&["bookmark", "forget", &temp]);
+            // The temp jj-hooks-fixup bookmark was already forgotten by
+            // `hooks::run_for_update` after `jj git import` — nothing to
+            // clean up here.
             advanced.push(update.bookmark.clone());
         }
     }
