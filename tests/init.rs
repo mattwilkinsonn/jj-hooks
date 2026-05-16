@@ -133,12 +133,17 @@ fn add_jjui_actions_to_empty_config() {
         .iter()
         .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
         .collect();
-    assert!(action_names.contains(&"jj-push"));
-    assert!(action_names.contains(&"jj-push-selected"));
+    assert!(action_names.contains(&"jj-hp-push"), "{action_names:?}");
+    assert!(
+        action_names.contains(&"jj-hp-push-selected"),
+        "{action_names:?}"
+    );
 
     let bindings = parsed["bindings"].as_array().unwrap();
     let mut found_xp = false;
     let mut found_xp_caps = false;
+    let mut xp_desc = "";
+    let mut xp_caps_desc = "";
     for b in bindings {
         let action = b.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let seq: Vec<&str> = b
@@ -146,18 +151,22 @@ fn add_jjui_actions_to_empty_config() {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        if action == "jj-push" && seq == ["x", "p"] {
+        let desc = b.get("desc").and_then(|v| v.as_str()).unwrap_or("");
+        if action == "jj-hp-push" && seq == ["x", "p"] {
             found_xp = true;
+            xp_desc = desc;
         }
-        if action == "jj-push-selected" && seq == ["x", "P"] {
+        if action == "jj-hp-push-selected" && seq == ["x", "P"] {
             found_xp_caps = true;
+            xp_caps_desc = desc;
         }
     }
-    assert!(found_xp, "expected jj-push bound to x p");
-    assert!(found_xp_caps, "expected jj-push-selected bound to x P");
+    assert!(found_xp, "expected jj-hp-push bound to x p");
+    assert!(found_xp_caps, "expected jj-hp-push-selected bound to x P");
+    assert_eq!(xp_desc, "jj-hp push");
+    assert_eq!(xp_caps_desc, "jj-hp push selected bookmark(s)");
 
-    // The lua bodies should invoke jj-hp directly (not `jj_async("push")`)
-    // so the actions don't require the `jj push` alias to be installed.
+    // The lua bodies should invoke jj-hp directly.
     let lua_bodies: Vec<&str> = actions
         .iter()
         .filter_map(|v| v.get("lua").and_then(|l| l.as_str()))
@@ -184,15 +193,13 @@ fn add_jjui_actions_idempotent_on_second_run() {
     assert!(!added.added_binding_x_p);
     assert!(!added.added_binding_x_p_caps);
 
-    // Re-parse rather than counting string occurrences (which depends on
-    // pretty-printer layout).
     let parsed: toml::Table = second.parse().unwrap();
     let actions = parsed["actions"].as_array().unwrap();
-    let jj_push_count = actions
+    let count = actions
         .iter()
-        .filter(|v| v.get("name").and_then(|n| n.as_str()) == Some("jj-push"))
+        .filter(|v| v.get("name").and_then(|n| n.as_str()) == Some("jj-hp-push"))
         .count();
-    assert_eq!(jj_push_count, 1);
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -213,11 +220,13 @@ desc = "quit"
     assert!(added.added_jj_push);
     assert!(output.contains(r#"name = "my-custom""#), "{output}");
     assert!(output.contains(r#"["q"]"#), "{output}");
-    assert!(output.contains(r#"name = "jj-push""#), "{output}");
+    assert!(output.contains(r#"name = "jj-hp-push""#), "{output}");
 }
 
 #[test]
-fn add_jjui_actions_keeps_existing_jj_push_when_name_already_taken() {
+fn add_jjui_actions_keeps_user_owned_jj_push_when_name_already_taken() {
+    // User has *their own* action literally named "jj-push" with a custom
+    // lua body. We must not rename or clobber it.
     let existing = r#"
 [[actions]]
 name = "jj-push"
@@ -226,12 +235,100 @@ lua = "print('user version')"
     let (output, added) = add_jjui_actions(existing).unwrap();
     assert!(
         !added.added_jj_push,
-        "should not have added (user already has one)"
+        "should not have added (user already has one with custom lua)"
     );
     assert!(output.contains("print('user version')"));
-    // jj-push-selected should still get added since its name is free.
+    // jj-hp-push-selected should still get added since its name is free.
     assert!(added.added_jj_push_selected);
-    assert!(output.contains(r#"name = "jj-push-selected""#));
+    assert!(output.contains(r#"name = "jj-hp-push-selected""#));
+}
+
+#[test]
+fn add_jjui_actions_renames_old_managed_jj_push_to_jj_hp_push() {
+    // Existing config has the OLD action/binding names but lua bodies
+    // we know we wrote (i.e. they're auto-installed, not user-customized).
+    // Expected: rename `jj-push` → `jj-hp-push`, rename the binding's
+    // `action` reference and update its `desc`.
+    let existing = r#"
+[[actions]]
+name = "jj-push"
+lua = """
+  jj_async("util", "exec", "--", "jj-hp", "push")
+  revisions.refresh()
+"""
+
+[[actions]]
+name = "jj-push-selected"
+lua = """
+  jj_async("util", "exec", "--", "jj-hp", "push", "-r", context.commit_id())
+  revisions.refresh()
+"""
+
+[[bindings]]
+action = "jj-push"
+seq = ["x", "p"]
+scope = "revisions"
+desc = "jj push"
+
+[[bindings]]
+action = "jj-push-selected"
+seq = ["x", "P"]
+scope = "revisions"
+desc = "jj push selected bookmark(s)"
+"#;
+    let (output, added) = add_jjui_actions(existing).unwrap();
+
+    // Nothing was "added" — everything was renamed in place.
+    assert!(!added.added_jj_push, "should be a rename, not an add");
+    assert!(
+        !added.added_jj_push_selected,
+        "should be a rename, not an add"
+    );
+
+    let parsed: toml::Table = output.parse().unwrap();
+    let action_names: Vec<&str> = parsed["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(
+        action_names.contains(&"jj-hp-push"),
+        "expected rename to jj-hp-push: {action_names:?}"
+    );
+    assert!(
+        action_names.contains(&"jj-hp-push-selected"),
+        "expected rename to jj-hp-push-selected: {action_names:?}"
+    );
+    assert!(
+        !action_names.contains(&"jj-push"),
+        "old name should be gone: {action_names:?}"
+    );
+
+    // Bindings should have been rewired to the new action name AND
+    // their descs updated.
+    let bindings = parsed["bindings"].as_array().unwrap();
+    let mut found_xp = false;
+    let mut found_xp_caps = false;
+    for b in bindings {
+        let action = b.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let desc = b.get("desc").and_then(|v| v.as_str()).unwrap_or("");
+        if action == "jj-hp-push" {
+            found_xp = true;
+            assert_eq!(desc, "jj-hp push", "binding desc not updated");
+        }
+        if action == "jj-hp-push-selected" {
+            found_xp_caps = true;
+            assert_eq!(
+                desc, "jj-hp push selected bookmark(s)",
+                "binding desc not updated"
+            );
+        }
+        assert_ne!(action, "jj-push", "stale binding action reference");
+        assert_ne!(action, "jj-push-selected", "stale binding action reference");
+    }
+    assert!(found_xp);
+    assert!(found_xp_caps);
 }
 
 #[test]
@@ -251,5 +348,5 @@ fn apply_writes_jjui_config_when_requested() {
     assert!(outcome.jjui_actions_added.added_binding_x_p);
 
     let written = std::fs::read_to_string(&jjui_config).unwrap();
-    assert!(written.contains(r#"name = "jj-push""#));
+    assert!(written.contains(r#"name = "jj-hp-push""#));
 }

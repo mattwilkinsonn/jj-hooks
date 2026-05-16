@@ -208,11 +208,20 @@ fn apply_jjui_config(path: &Path) -> Result<AddedItems> {
     Ok(added)
 }
 
-/// Merge `jj-push` / `jj-push-selected` actions and their `x p` / `x P`
-/// bindings into a jjui config TOML string. Existing items with the same
-/// `name` (for actions) or matching `(action, seq)` (for bindings) are
-/// left untouched; only the missing ones are appended. Returns the new
-/// TOML and a record of which items were added.
+/// Merge `jj-hp-push` / `jj-hp-push-selected` actions and their `x p` / `x P`
+/// bindings into a jjui config TOML string.
+///
+/// Three cases per action:
+/// 1. Neither old nor new name present → add the new one.
+/// 2. New name already present → leave alone (idempotent).
+/// 3. Old `jj-push` / `jj-push-selected` name present with a lua body
+///    matching one of our known auto-installed forms → rename in place
+///    (action name + any bindings pointing at it, plus binding desc).
+/// 4. Old name present with a custom lua body the user wrote → leave
+///    alone. The user owns that name.
+///
+/// Returns the new TOML and a record of which items were newly added.
+/// Renames count as 0 added (they're migrations, not adds).
 pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
     let mut doc: toml::Table = if existing.trim().is_empty() {
         toml::Table::new()
@@ -224,7 +233,7 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
 
     let mut added = AddedItems::default();
 
-    // Actions.
+    // -- Actions ------------------------------------------------------------
     let actions = doc
         .entry("actions")
         .or_insert_with(|| toml::Value::Array(Vec::new()));
@@ -232,43 +241,30 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         .as_array_mut()
         .ok_or_else(|| JjHooksError::Parse("jjui config: `actions` is not an array".into()))?;
 
-    let jj_push_already = actions_arr
-        .iter()
-        .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("jj-push"));
-    let jj_push_selected_already = actions_arr
-        .iter()
-        .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("jj-push-selected"));
+    let push_state = classify_action(actions_arr, NEW_PUSH_NAME, OLD_PUSH_NAME, &push_lua_forms());
+    let push_selected_state = classify_action(
+        actions_arr,
+        NEW_PUSH_SELECTED_NAME,
+        OLD_PUSH_SELECTED_NAME,
+        &push_selected_lua_forms(),
+    );
 
-    if !jj_push_already {
-        let mut t = toml::Table::new();
-        t.insert("name".into(), toml::Value::String("jj-push".into()));
-        t.insert(
-            "lua".into(),
-            toml::Value::String(
-                "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\")\n  revisions.refresh()\n"
-                    .into(),
-            ),
-        );
-        actions_arr.push(toml::Value::Table(t));
-        added.added_jj_push = true;
-    }
-    if !jj_push_selected_already {
-        let mut t = toml::Table::new();
-        t.insert(
-            "name".into(),
-            toml::Value::String("jj-push-selected".into()),
-        );
-        t.insert(
-            "lua".into(),
-            toml::Value::String(
-                "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\", \"-r\", context.commit_id())\n  revisions.refresh()\n".into(),
-            ),
-        );
-        actions_arr.push(toml::Value::Table(t));
-        added.added_jj_push_selected = true;
-    }
+    apply_action(
+        actions_arr,
+        push_state,
+        NEW_PUSH_NAME,
+        push_lua_forms()[0].to_owned(),
+        &mut added.added_jj_push,
+    );
+    apply_action(
+        actions_arr,
+        push_selected_state,
+        NEW_PUSH_SELECTED_NAME,
+        push_selected_lua_forms()[0].to_owned(),
+        &mut added.added_jj_push_selected,
+    );
 
-    // Bindings.
+    // -- Bindings -----------------------------------------------------------
     let bindings = doc
         .entry("bindings")
         .or_insert_with(|| toml::Value::Array(Vec::new()));
@@ -276,19 +272,48 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         .as_array_mut()
         .ok_or_else(|| JjHooksError::Parse("jjui config: `bindings` is not an array".into()))?;
 
-    let binding_x_p_already = bindings_has_action(bindings_arr, "jj-push");
-    let binding_x_p_caps_already = bindings_has_action(bindings_arr, "jj-push-selected");
+    // For each binding pointing at an old action name, rename its `action`
+    // field to the new name and update `desc`. (This is independent of
+    // whether the action itself got renamed — there could be a stale
+    // binding referencing an action we already renamed.)
+    for b in bindings_arr.iter_mut() {
+        let Some(action) = b.get("action").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if action == OLD_PUSH_NAME && push_state == ActionState::OldManaged {
+            let table = b.as_table_mut().unwrap();
+            table.insert("action".into(), toml::Value::String(NEW_PUSH_NAME.into()));
+            table.insert("desc".into(), toml::Value::String(NEW_PUSH_DESC.into()));
+        } else if action == OLD_PUSH_SELECTED_NAME && push_selected_state == ActionState::OldManaged
+        {
+            let table = b.as_table_mut().unwrap();
+            table.insert(
+                "action".into(),
+                toml::Value::String(NEW_PUSH_SELECTED_NAME.into()),
+            );
+            table.insert(
+                "desc".into(),
+                toml::Value::String(NEW_PUSH_SELECTED_DESC.into()),
+            );
+        }
+    }
 
-    if !binding_x_p_already {
-        bindings_arr.push(make_binding("jj-push", &["x", "p"], "revisions", "jj push"));
+    // Add any missing bindings (idempotent).
+    if !bindings_has_action(bindings_arr, NEW_PUSH_NAME) {
+        bindings_arr.push(make_binding(
+            NEW_PUSH_NAME,
+            &["x", "p"],
+            "revisions",
+            NEW_PUSH_DESC,
+        ));
         added.added_binding_x_p = true;
     }
-    if !binding_x_p_caps_already {
+    if !bindings_has_action(bindings_arr, NEW_PUSH_SELECTED_NAME) {
         bindings_arr.push(make_binding(
-            "jj-push-selected",
+            NEW_PUSH_SELECTED_NAME,
             &["x", "P"],
             "revisions",
-            "jj push selected bookmark(s)",
+            NEW_PUSH_SELECTED_DESC,
         ));
         added.added_binding_x_p_caps = true;
     }
@@ -297,6 +322,125 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         .map_err(|e| JjHooksError::Parse(format!("serializing jjui config: {e}")))?;
 
     Ok((serialized, added))
+}
+
+const NEW_PUSH_NAME: &str = "jj-hp-push";
+const NEW_PUSH_SELECTED_NAME: &str = "jj-hp-push-selected";
+const OLD_PUSH_NAME: &str = "jj-push";
+const OLD_PUSH_SELECTED_NAME: &str = "jj-push-selected";
+const NEW_PUSH_DESC: &str = "jj-hp push";
+const NEW_PUSH_SELECTED_DESC: &str = "jj-hp push selected bookmark(s)";
+
+/// Known lua bodies we have auto-installed for `jj-hp-push` historically.
+/// Index 0 is the current form; later indices are older forms we still
+/// recognize as ours (so we can safely rename them).
+fn push_lua_forms() -> Vec<&'static str> {
+    vec![
+        // Current form.
+        "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\")\n  revisions.refresh()\n",
+        // Pre-jj-hp form (called `jj push` via the alias).
+        "  jj_async(\"push\")\n  revisions.refresh()\n",
+    ]
+}
+
+fn push_selected_lua_forms() -> Vec<&'static str> {
+    vec![
+        // Current form.
+        "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\", \"-r\", context.commit_id())\n  revisions.refresh()\n",
+        // Pre-jj-hp form.
+        "  jj_async(\"push\", \"-r\", context.commit_id())\n  revisions.refresh()\n",
+    ]
+}
+
+/// What we found when classifying an action by its name + lua body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionState {
+    /// Neither name present anywhere — we need to add the new action.
+    Missing,
+    /// New name already present — leave alone.
+    AlreadyNewName,
+    /// Old name present, lua matches one of our known forms — safe to rename.
+    OldManaged,
+    /// Old name present, lua is custom (user-owned) — leave alone.
+    OldUserOwned,
+}
+
+fn classify_action(
+    actions: &[toml::Value],
+    new_name: &str,
+    old_name: &str,
+    known_lua: &[&str],
+) -> ActionState {
+    let mut found_new = false;
+    let mut found_old: Option<&str> = None;
+    for a in actions {
+        let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if name == new_name {
+            found_new = true;
+        }
+        if name == old_name {
+            found_old = a.get("lua").and_then(|v| v.as_str());
+        }
+    }
+    if found_new {
+        return ActionState::AlreadyNewName;
+    }
+    match found_old {
+        None => ActionState::Missing,
+        Some(lua) if known_lua.contains(&lua) => ActionState::OldManaged,
+        Some(_) => ActionState::OldUserOwned,
+    }
+}
+
+fn apply_action(
+    actions: &mut Vec<toml::Value>,
+    state: ActionState,
+    new_name: &str,
+    new_lua: String,
+    added_flag: &mut bool,
+) {
+    match state {
+        ActionState::Missing | ActionState::OldUserOwned => {
+            // Either we own the slot and need to add it, or the user has
+            // co-opted the old name with custom lua — in both cases we
+            // want to add (or skip if user-owned and we have no slot).
+            if matches!(state, ActionState::Missing) {
+                let mut t = toml::Table::new();
+                t.insert("name".into(), toml::Value::String(new_name.into()));
+                t.insert("lua".into(), toml::Value::String(new_lua));
+                actions.push(toml::Value::Table(t));
+                *added_flag = true;
+            }
+        }
+        ActionState::AlreadyNewName => {
+            // Idempotent: leave alone.
+        }
+        ActionState::OldManaged => {
+            // Rename in place. Find the old entry and rename it; also
+            // refresh the lua to the current form.
+            for a in actions.iter_mut() {
+                let Some(table) = a.as_table_mut() else {
+                    continue;
+                };
+                let name = table
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                let old_match = match name.as_deref() {
+                    Some("jj-push") if new_name == NEW_PUSH_NAME => true,
+                    Some("jj-push-selected") if new_name == NEW_PUSH_SELECTED_NAME => true,
+                    _ => false,
+                };
+                if old_match {
+                    table.insert("name".into(), toml::Value::String(new_name.into()));
+                    table.insert("lua".into(), toml::Value::String(new_lua));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn bindings_has_action(arr: &[toml::Value], action: &str) -> bool {
