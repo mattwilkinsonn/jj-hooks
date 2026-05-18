@@ -29,10 +29,16 @@ pub struct HookOutcome {
 
 /// Run hooks for one bookmark update. Returns the outcome (success +
 /// optional fixup commit).
+///
+/// `cli_runner` is the user's `--runner` override (or `None` for autodetect).
+/// When `None`, runner detection happens inside the ephemeral worktree at the
+/// target commit — so a commit that migrated runners (e.g. `lefthook → hk`)
+/// is gated by the runner the *target* commits to, not the runner the user's
+/// primary workspace currently has on disk.
 pub fn run_for_update(
     jj: &JjCli,
     primary_git_dir: &Path,
-    runner: Runner,
+    cli_runner: Option<Runner>,
     stage: Stage,
     update: &BookmarkUpdate,
 ) -> Result<HookOutcome> {
@@ -47,6 +53,27 @@ pub fn run_for_update(
     let from_refs = resolve_from_refs(jj, update)?;
 
     let wt = Worktree::create(primary_git_dir, new_commit)?;
+
+    // Resolve the runner from the target commit's tree, not the primary
+    // workspace. `--runner` overrides; otherwise autodetect against the
+    // worktree we just checked out. If autodetect comes up empty, the
+    // commit doesn't have a hook config — silent-skip with an info log.
+    let runner = match cli_runner {
+        Some(r) => r,
+        None => {
+            let Some(r) = Runner::autodetect(wt.path())? else {
+                tracing::info!("{update}: no hook-runner config in target commit; skipping hooks");
+                return Ok(HookOutcome {
+                    success: true,
+                    fixup_commit: None,
+                });
+            };
+            // prek is a faster drop-in for pre-commit; prefer it when
+            // present. The override path already skips this so an explicit
+            // `--runner pre-commit` keeps the slower binary.
+            crate::runner::prefer_prek_when_available(r, crate::runner::prek_on_path())
+        }
+    };
 
     let mut success = true;
     for from_ref in &from_refs {
