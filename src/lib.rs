@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, RunnerArg};
+use crate::cli::{Cli, Command};
 use crate::error::JjHooksError;
 use crate::init::InteractivePrompter;
 use crate::jj::JjCli;
@@ -75,13 +75,15 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             // Argv used to actually push (includes --dry-run if requested).
             let push_argv = crate::cli::push_argv(&push, dry_run);
 
-            let Some(runner) = resolve_runner(cli.runner, &workspace_root)? else {
-                tracing::info!("no hook-runner config detected; falling through to jj git push");
-                execute_push(&jj, &push_argv, false)?;
-                return Ok(ExitCode::SUCCESS);
-            };
+            // Resolve the runner per-update inside `run_checks` so a
+            // runner-migration commit (e.g. one that deletes lefthook.yml
+            // and adds hk.pkl) is gated by the runner the *target* commit
+            // commits to, not the runner the primary workspace happens
+            // to have on disk right now. The `--runner` CLI flag still
+            // overrides this for users who need to force a specific runner.
+            let cli_runner: Option<Runner> = cli.runner.map(Into::into);
 
-            let report = run_checks(&jj, &workspace_root, runner, stage.into(), &select_argv)?;
+            let report = run_checks(&jj, &workspace_root, cli_runner, stage.into(), &select_argv)?;
 
             if report.skipped {
                 execute_push(&jj, &push_argv, false)?;
@@ -114,12 +116,12 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
 
         Command::Run { stage, revset } => {
             let workspace_root = jj.workspace_root()?;
-            let Some(runner) = resolve_runner(cli.runner, &workspace_root)? else {
-                tracing::info!("no hook-runner config detected; nothing to do");
-                return Ok(ExitCode::SUCCESS);
-            };
+            // Same per-worktree autodetect contract as the push path: the
+            // runner is picked from the target commit's own tree, not from
+            // the primary workspace. `--runner` overrides.
+            let cli_runner: Option<Runner> = cli.runner.map(Into::into);
 
-            run_against_revset(&jj, &workspace_root, runner, stage.into(), &revset)
+            run_against_revset(&jj, &workspace_root, cli_runner, stage.into(), &revset)
         }
 
         Command::Init => {
@@ -197,21 +199,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
     }
 }
 
-fn resolve_runner(
-    flag: Option<RunnerArg>,
-    workspace_root: &std::path::Path,
-) -> Result<Option<Runner>, JjHooksError> {
-    if let Some(r) = flag {
-        // User asked for a specific runner — honor it exactly.
-        return Ok(Some(r.into()));
-    }
-    let autodetected = Runner::autodetect(workspace_root)?;
-    Ok(autodetected.map(|r| {
-        // prek is a faster drop-in for pre-commit; prefer it when present.
-        crate::runner::prefer_prek_when_available(r, crate::runner::prek_on_path())
-    }))
-}
-
 fn advance_bookmarks_from_config(jj: &JjCli) -> bool {
     matches!(
         jj.run(&["config", "get", "jj-hooks.advance-bookmarks"])
@@ -224,7 +211,7 @@ fn advance_bookmarks_from_config(jj: &JjCli) -> bool {
 fn run_against_revset(
     jj: &JjCli,
     workspace_root: &std::path::Path,
-    runner: Runner,
+    cli_runner: Option<Runner>,
     stage: Stage,
     revset: &str,
 ) -> Result<ExitCode, JjHooksError> {
@@ -267,7 +254,7 @@ fn run_against_revset(
     };
 
     let primary_git_dir = jj::primary_git_dir(workspace_root)?;
-    let outcome = hooks::run_for_update(jj, &primary_git_dir, runner, stage, &update)?;
+    let outcome = hooks::run_for_update(jj, &primary_git_dir, cli_runner, stage, &update)?;
 
     if let Some(commit) = &outcome.fixup_commit {
         eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");

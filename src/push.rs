@@ -31,10 +31,15 @@ impl PushReport {
 }
 
 /// Run hooks for every bookmark that would be pushed by `jj git push <push_args>`.
+///
+/// `cli_runner` is `None` when the user did not pass `--runner`. In that
+/// case `run_for_update` autodetects the runner from each target commit's
+/// own tree (so a runner-migration commit picks the new runner). When
+/// `Some(r)`, the user's choice is honored as-is for every update.
 pub fn run_checks(
     jj: &JjCli,
     workspace_root: &Path,
-    runner: Runner,
+    cli_runner: Option<Runner>,
     stage: Stage,
     push_args: &[String],
 ) -> Result<PushReport> {
@@ -65,8 +70,11 @@ pub fn run_checks(
 
     let mut per_bookmark = Vec::with_capacity(non_deletes.len());
     for update in non_deletes {
-        tracing::info!("{update}: running {} hooks", runner.bin());
-        let outcome = run_for_update(jj, &primary_git_dir, runner, stage, &update)?;
+        match cli_runner {
+            Some(r) => tracing::info!("{update}: running {} hooks", r.bin()),
+            None => tracing::info!("{update}: autodetecting runner inside target worktree"),
+        }
+        let outcome = run_for_update(jj, &primary_git_dir, cli_runner, stage, &update)?;
         per_bookmark.push((update, outcome));
     }
 

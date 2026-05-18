@@ -504,3 +504,130 @@ fn hk_hook_autofix_creates_fixup_ref() {
         .expect("fixup commit should be findable by description");
     assert!(repo.jj_knows_commit(&fixup));
 }
+
+// -- runner migration (issue #2) ---------------------------------------------
+
+#[test]
+fn runner_autodetect_inside_target_worktree_not_primary() {
+    // Regression for issue #2: when the primary workspace has one runner
+    // config on disk but the target commit being pushed has a *different*
+    // runner config, autodetect must pick the target commit's runner — not
+    // the primary's. Repro: primary has `lefthook.yml`, target commit has
+    // `hk.pkl` with a failing hook. Pre-fix would autodetect lefthook in
+    // primary, run lefthook in the target worktree (which has no
+    // `lefthook.yml`), get a clean exit 0 ("no config"), and push the
+    // failing hk commit unchecked. Post-fix autodetects hk inside the
+    // target worktree, runs the failing config, and aborts the push.
+    let repo = TestRepo::new();
+
+    // Build the migration commit on a feature bookmark: write hk.pkl with
+    // a hook that always fails, commit, create the bookmark on @-.
+    repo.write_hk_config(HK_PRE_PUSH_FAILING);
+    let out = repo.jj(&["commit", "-m", "migrate to hk"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "create", "migrate-to-hk", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    // Move the working copy back to main and put `lefthook.yml` (with a
+    // passing config so a stale autodetect would happily report success)
+    // on disk. Primary now disagrees with the target commit about which
+    // runner config exists.
+    let out = repo.jj(&["new", "main"]);
+    assert!(out.status.success(), "{}", show(&out));
+    // After `jj new main`, the working copy is reset to main's tree (no
+    // hk.pkl, since main predates the migration commit). Now write the
+    // lefthook config so primary has a config that the pre-fix autodetect
+    // would latch onto.
+    repo.write_lefthook_config(LEFTHOOK_PRE_PUSH_PASSING);
+
+    // Sanity-check the disagreement: primary has lefthook.yml on disk
+    // but no hk.pkl; the target commit has hk.pkl (failing) and no
+    // lefthook.yml. The pre-fix bug is autodetect picking up the
+    // wrong runner here.
+    assert!(repo.primary().join("lefthook.yml").exists());
+    assert!(!repo.primary().join("hk.pkl").exists());
+
+    let remote_before = repo.remote_commit("migrate-to-hk");
+
+    // No --runner flag, so we exercise the autodetect path that the issue
+    // is about. Push must fail because the hk hook fails, not succeed
+    // because lefthook silent-skipped on a missing config.
+    let out = repo.jj_hooks(&["push", "-b", "migrate-to-hk", "--allow-new"]);
+    assert!(
+        !out.status.success(),
+        "push should abort because hk hook fails:\n{}",
+        show(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("No config files with names [\"lefthook\""),
+        "lefthook should not be the picked runner (primary's config bled \
+         into the target worktree's autodetect):\n{stderr}"
+    );
+    // Remote did not move.
+    assert_eq!(repo.remote_commit("migrate-to-hk"), remote_before);
+}
+
+#[test]
+fn runner_autodetect_inside_target_worktree_picks_lefthook() {
+    // Mirror of the above: target commit has lefthook, primary has hk.
+    // Exercises the symmetric scenario so a fix that only handles one
+    // direction can't pass.
+    let repo = TestRepo::new();
+
+    repo.write_lefthook_config(LEFTHOOK_PRE_PUSH_FAILING);
+    let out = repo.jj(&["commit", "-m", "migrate to lefthook"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "create", "migrate-to-lefthook", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let out = repo.jj(&["new", "main"]);
+    assert!(out.status.success(), "{}", show(&out));
+    repo.write_hk_config(HK_PRE_PUSH_PASSING);
+
+    assert!(repo.primary().join("hk.pkl").exists());
+    assert!(!repo.primary().join("lefthook.yml").exists());
+
+    let remote_before = repo.remote_commit("migrate-to-lefthook");
+
+    let out = repo.jj_hooks(&["push", "-b", "migrate-to-lefthook", "--allow-new"]);
+    assert!(
+        !out.status.success(),
+        "push should abort because the target commit's lefthook hook fails:\n{}",
+        show(&out)
+    );
+    assert_eq!(repo.remote_commit("migrate-to-lefthook"), remote_before);
+}
+
+#[test]
+fn runner_autodetect_skips_when_target_commit_has_no_config() {
+    // When the target commit has no hook-runner config at all, the push
+    // proceeds with no hooks — even if primary has a config on disk that
+    // would have failed. This matches the pre-existing behavior for the
+    // no-config case at the workspace level.
+    let repo = TestRepo::new();
+
+    // Target commit: no hook configs at all.
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let head = repo.commit_id_of("main");
+
+    // Primary working copy: a failing lefthook config. Pre-fix would
+    // autodetect it and run lefthook against the target worktree (which
+    // has no lefthook.yml), get a silent skip, and push. Post-fix
+    // autodetects against the target worktree directly, sees no config,
+    // and silent-skips by design — same end result, different reasoning.
+    repo.write_lefthook_config(LEFTHOOK_PRE_PUSH_FAILING);
+
+    let out = repo.jj_hooks(&["push", "-b", "main"]);
+    assert!(
+        out.status.success(),
+        "target commit has no hook config; push should proceed:\n{}",
+        show(&out)
+    );
+    assert_eq!(repo.remote_commit("main").as_deref(), Some(head.as_str()));
+}
