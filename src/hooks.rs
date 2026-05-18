@@ -81,8 +81,10 @@ pub fn run_for_update(
     };
 
     if fixup_commit.is_some() {
-        // Make jj aware of the new commit.
-        jj.run(&["git", "import"])?;
+        // Make jj aware of the new commit. --ignore-working-copy keeps
+        // this import from racing against any concurrent `jj` process
+        // (same lock-contention rationale as in push.rs).
+        jj.run(&["git", "import", "--ignore-working-copy"])?;
 
         // jj git import created a `jj-hooks-fixup/<bookmark>` jj bookmark
         // from the underlying refs/heads/jj-hooks-fixup/<bookmark> ref.
@@ -97,7 +99,12 @@ pub fn run_for_update(
         // secondary workspace it leaves the underlying refs/heads/<name>
         // ref alive in the primary's git dir. Explicitly delete the
         // git ref ourselves so the cleanup is uniform.
-        let _ = jj.run(&["bookmark", "forget", &temp_bookmark]);
+        let _ = jj.run(&[
+            "bookmark",
+            "forget",
+            &temp_bookmark,
+            "--ignore-working-copy",
+        ]);
         let _ = delete_git_ref(primary_git_dir, &fixup_ref(&update.bookmark));
     }
 
