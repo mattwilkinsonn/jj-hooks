@@ -317,6 +317,52 @@ fn run_subcommand_executes_hooks_without_pushing() {
     assert_eq!(repo.remote_commit("main"), remote_before);
 }
 
+#[test]
+fn run_subcommand_autofix_does_not_crash_on_bad_ref_name() {
+    // Regression for issue #1: `jj-hp run <revset>` synthesizes a bookmark
+    // name of `revset:<revset>` and feeds it through `fixup_ref`, which
+    // produced `refs/heads/jj-hooks-fixup/revset:@` — a name git rejects
+    // ("refusing to update ref with bad name"). The sanitizer scrubs `:`
+    // and friends so the ref is well-formed.
+    let repo = TestRepo::new();
+    repo.write_pre_commit_config(PRE_PUSH_AUTOFIX);
+
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    // `jj-hp run` exits nonzero when hooks modified files (same contract
+    // as the push path). The bug we're guarding against is a crash with
+    // status 128 / "bad name", not a clean nonzero exit. Check the
+    // stderr explicitly so a regression of the original symptom fails
+    // loudly even if the exit code happens to match.
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "run", "--stage", "pre-push", "@-"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("refusing to update ref with bad name"),
+        "expected sanitizer to scrub `:` from synthesized ref:\n{}",
+        show(&out)
+    );
+    assert!(
+        !stderr.contains("update_ref failed"),
+        "ref update should succeed after sanitization:\n{}",
+        show(&out)
+    );
+
+    // The synthesized bookmark name `revset:@-` becomes `revset_@-` for
+    // the fixup ref. Confirm the sanitized ref was created (and then
+    // cleaned up post-import, same as the regular push path).
+    assert!(
+        repo.rev_parse("refs/heads/jj-hooks-fixup/revset_@-")
+            .is_none(),
+        "temp fixup ref should be cleaned up after import"
+    );
+    let fixup = repo
+        .fixup_commit_for("revset:@-")
+        .expect("fixup commit should be findable by description");
+    assert!(repo.jj_knows_commit(&fixup));
+}
+
 // -- prek -------------------------------------------------------------------
 //
 // prek is CLI-compatible with pre-commit and reads the same
