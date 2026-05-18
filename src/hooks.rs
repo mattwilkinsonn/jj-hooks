@@ -215,12 +215,62 @@ fn build_fixup_commit(
 /// The git ref where a fixup commit gets anchored for a given bookmark.
 /// Lives under `refs/heads/` so `jj git import` picks it up as a bookmark.
 pub fn fixup_ref(bookmark: &str) -> String {
-    format!("refs/heads/jj-hooks-fixup/{bookmark}")
+    format!("refs/heads/jj-hooks-fixup/{}", sanitize_for_ref(bookmark))
 }
 
 /// The jj bookmark name corresponding to `fixup_ref`.
 pub fn fixup_bookmark(bookmark: &str) -> String {
-    format!("jj-hooks-fixup/{bookmark}")
+    format!("jj-hooks-fixup/{}", sanitize_for_ref(bookmark))
+}
+
+/// Replace characters that git rejects in ref names (per git-check-ref-format)
+/// with `_`. Real bookmark names like `main` or `feature/foo` pass through
+/// unchanged; synthesized names like `revset:@` (used by `jj-hp run @`) get
+/// scrubbed so the resulting `refs/heads/jj-hooks-fixup/<name>` is valid.
+fn sanitize_for_ref(s: &str) -> String {
+    // Per-character offenders first; then collapse multi-char sequences
+    // and trim the position-sensitive ones (leading `-`/`.`, trailing
+    // `.`/`.lock`/`/`, internal `//`).
+    let mut out: String = s
+        .chars()
+        .map(|c| match c {
+            ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '\x7f' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect();
+
+    while out.contains("..") {
+        out = out.replace("..", "__");
+    }
+    while out.contains("@{") {
+        out = out.replace("@{", "@_");
+    }
+    if out.starts_with('-') {
+        out.replace_range(0..1, "_");
+    }
+    if out.starts_with('.') {
+        out.replace_range(0..1, "_");
+    }
+    if out.ends_with('.') {
+        let n = out.len();
+        out.replace_range(n - 1..n, "_");
+    }
+    if out.ends_with(".lock") {
+        let n = out.len();
+        out.replace_range(n - 5..n - 4, "_");
+    }
+    if out.ends_with('/') {
+        let n = out.len();
+        out.replace_range(n - 1..n, "_");
+    }
+    while out.contains("//") {
+        out = out.replace("//", "/_");
+    }
+    if out.is_empty() {
+        return "_".into();
+    }
+    out
 }
 
 /// Delete a git ref in the given git dir, ignoring "ref doesn't exist"
@@ -288,4 +338,105 @@ fn run_git_capture_with_git_dir(git_dir: &Path, cwd: &Path, args: &[&str]) -> Re
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixup_ref_for_plain_bookmark() {
+        assert_eq!(fixup_ref("main"), "refs/heads/jj-hooks-fixup/main");
+    }
+
+    #[test]
+    fn fixup_ref_keeps_internal_slash() {
+        // jj bookmark names commonly contain `/` (e.g. `feature/foo`) and
+        // git accepts them as path separators inside a ref.
+        assert_eq!(
+            fixup_ref("feature/foo"),
+            "refs/heads/jj-hooks-fixup/feature/foo"
+        );
+    }
+
+    #[test]
+    fn fixup_ref_scrubs_colon() {
+        // The bug from issue #1: `jj-hp run @` synthesizes `revset:@`.
+        // Without sanitization, git rejects the ref with "bad name".
+        assert_eq!(fixup_ref("revset:@"), "refs/heads/jj-hooks-fixup/revset_@");
+    }
+
+    #[test]
+    fn sanitize_replaces_each_invalid_char() {
+        // One probe per character class git-check-ref-format rejects.
+        assert_eq!(sanitize_for_ref("a:b"), "a_b");
+        assert_eq!(sanitize_for_ref("a~b"), "a_b");
+        assert_eq!(sanitize_for_ref("a^b"), "a_b");
+        assert_eq!(sanitize_for_ref("a?b"), "a_b");
+        assert_eq!(sanitize_for_ref("a*b"), "a_b");
+        assert_eq!(sanitize_for_ref("a[b"), "a_b");
+        assert_eq!(sanitize_for_ref("a\\b"), "a_b");
+        assert_eq!(sanitize_for_ref("a b"), "a_b");
+        assert_eq!(sanitize_for_ref("a\tb"), "a_b");
+        assert_eq!(sanitize_for_ref("a\x7fb"), "a_b");
+    }
+
+    #[test]
+    fn sanitize_collapses_double_dot() {
+        assert_eq!(sanitize_for_ref("a..b"), "a__b");
+        // `..` replacement is non-overlapping: `a...b` becomes `a__.b`
+        // (first `..` matches at positions 1-2 and gets replaced; the
+        // remaining `.` is harmless mid-string).
+        assert_eq!(sanitize_for_ref("a...b"), "a__.b");
+        assert!(!sanitize_for_ref("a....b").contains(".."));
+    }
+
+    #[test]
+    fn sanitize_collapses_at_brace() {
+        assert_eq!(sanitize_for_ref("a@{b"), "a@_b");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_dash() {
+        assert_eq!(sanitize_for_ref("-foo"), "_foo");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_dot() {
+        assert_eq!(sanitize_for_ref(".foo"), "_foo");
+    }
+
+    #[test]
+    fn sanitize_strips_trailing_dot() {
+        assert_eq!(sanitize_for_ref("foo."), "foo_");
+    }
+
+    #[test]
+    fn sanitize_strips_trailing_dot_lock() {
+        assert_eq!(sanitize_for_ref("foo.lock"), "foo_lock");
+    }
+
+    #[test]
+    fn sanitize_strips_trailing_slash() {
+        assert_eq!(sanitize_for_ref("foo/"), "foo_");
+    }
+
+    #[test]
+    fn sanitize_collapses_double_slash() {
+        assert_eq!(sanitize_for_ref("a//b"), "a/_b");
+    }
+
+    #[test]
+    fn sanitize_empty_becomes_underscore() {
+        // Defensive: if the input is empty after some external transform,
+        // emit a single underscore so the joined ref isn't dangling.
+        assert_eq!(sanitize_for_ref(""), "_");
+    }
+
+    #[test]
+    fn fixup_bookmark_uses_same_sanitizer() {
+        // fixup_bookmark feeds `jj bookmark forget` which is also strict
+        // about colon (jj rejects bookmark names with `:` in them).
+        assert_eq!(fixup_bookmark("revset:@"), "jj-hooks-fixup/revset_@");
+    }
 }
