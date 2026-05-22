@@ -96,16 +96,8 @@ pub fn run_for_update(
         }
     }
 
-    let fixup_commit = if worktree_dirty(wt.path())? {
-        Some(build_fixup_commit(
-            primary_git_dir,
-            wt.path(),
-            new_commit,
-            &update.bookmark,
-        )?)
-    } else {
-        None
-    };
+    let fixup_commit =
+        maybe_build_fixup_commit(primary_git_dir, wt.path(), new_commit, &update.bookmark)?;
 
     if fixup_commit.is_some() {
         // Make jj aware of the new commit. --ignore-working-copy keeps
@@ -204,25 +196,39 @@ fn changed_files(worktree: &Path, from: &str, to: &str) -> Result<Vec<PathBuf>> 
         .collect())
 }
 
-fn worktree_dirty(worktree: &Path) -> Result<bool> {
-    let out = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(worktree)
-        .output()?;
-    Ok(!out.stdout.is_empty())
-}
-
-fn build_fixup_commit(
+/// Stage everything in the worktree, hash the resulting tree, and
+/// compare against the parent commit's tree. Returns a fixup commit
+/// only when the trees actually differ — `git status --porcelain`
+/// can report a worktree as dirty (e.g. when a hook runner touched
+/// the index without changing file content; hk's auto-stage path
+/// does this even on check-only steps), but the resulting tree is
+/// often identical to the parent and an empty fixup commit is just
+/// noise that pins the bookmark to a content-equivalent revision
+/// and aborts the push.
+///
+/// Content-addressed gating eliminates the false positive: if the
+/// hooks didn't actually change any file, the write-tree OID equals
+/// the parent's tree OID and we return `None`.
+fn maybe_build_fixup_commit(
     primary_git_dir: &Path,
     worktree: &Path,
     parent: &str,
     bookmark: &str,
-) -> Result<String> {
-    // Stage everything (tracked + untracked) in the worktree.
+) -> Result<Option<String>> {
+    // Stage everything (tracked + untracked) and hash the tree.
+    // Both are cheap on a clean checkout — `git add -A` is a no-op
+    // when nothing changed; `git write-tree` is hashing-only.
     run_git(worktree, &["add", "-A"])?;
-
-    // Write the tree.
     let tree = run_git_capture(worktree, &["write-tree"])?;
+
+    // Parent's tree as a content reference. `<commit>^{tree}` is
+    // the standard rev-parse spelling.
+    let parent_tree_spec = format!("{parent}^{{tree}}");
+    let parent_tree = run_git_capture(worktree, &["rev-parse", &parent_tree_spec])?;
+
+    if tree == parent_tree {
+        return Ok(None);
+    }
 
     // Build the commit object via the *primary* git dir so the resulting
     // commit lives in the shared object database.
@@ -243,7 +249,7 @@ fn build_fixup_commit(
         &["update-ref", &ref_name, &commit],
     )?;
 
-    Ok(commit)
+    Ok(Some(commit))
 }
 
 /// The git ref where a fixup commit gets anchored for a given bookmark.

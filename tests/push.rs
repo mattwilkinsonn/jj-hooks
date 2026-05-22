@@ -9,7 +9,7 @@ mod harness;
 use harness::{
     HK_PRE_PUSH_AUTOFIX, HK_PRE_PUSH_FAILING, HK_PRE_PUSH_PASSING, LEFTHOOK_PRE_PUSH_AUTOFIX,
     LEFTHOOK_PRE_PUSH_FAILING, LEFTHOOK_PRE_PUSH_PASSING, PRE_PUSH_AUTOFIX, PRE_PUSH_FAILING,
-    PRE_PUSH_PASSING, TestRepo, show,
+    PRE_PUSH_INDEX_TOUCH_ONLY, PRE_PUSH_PASSING, TestRepo, show,
 };
 
 /// Sanity: harness builds a working primary + remote and `jj git push` works
@@ -192,6 +192,64 @@ fn hook_autofix_with_advance_bookmarks_moves_local_bookmark() {
     assert!(
         repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
         "temporary fixup ref should be cleaned up after --advance-bookmarks"
+    );
+}
+
+/// Issue #7 regression: a hook that touches the index without
+/// changing file content (e.g. a runner's stash + restore
+/// lifecycle that leaves the index stat-mismatched against the
+/// final on-disk content) must NOT produce an empty fixup commit.
+///
+/// pre-commit additionally detects "files were modified by this
+/// hook" mid-flight and reports the hook as failed, so the push
+/// still aborts — but the abort path's "hooks modified files
+/// (fixup commit …)" branch must not fire, because the resulting
+/// tree is identical to the parent.
+///
+/// Pre-fix shape: `worktree_dirty` returns true because
+/// `git status --porcelain` reports an index-stat change; we
+/// commit an empty fixup commit. The push log shows BOTH "hook
+/// failed" AND "hooks modified files (fixup commit …)" — the
+/// second line is the bug.
+///
+/// Post-fix shape: tree comparison sees parent's tree == current
+/// tree → no fixup commit emitted. Push still aborts because the
+/// hook itself returned non-zero.
+#[test]
+fn index_touch_without_content_change_does_not_emit_fixup() {
+    let repo = TestRepo::new();
+    repo.write_pre_commit_config(PRE_PUSH_INDEX_TOUCH_ONLY);
+
+    // Tracked file the hook will round-trip. Commit before the hook
+    // runs so it's part of the parent's tree.
+    repo.write("existing.txt", "stable content\n");
+    let out = repo.jj(&["commit", "-m", "second"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let remote_before = repo.remote_commit("main");
+
+    let out = repo.jj_hooks(&["--runner", "pre-commit", "push", "-b", "main"]);
+    // The push aborts because the hook failed.
+    assert!(
+        !out.status.success(),
+        "push should abort when the hook reports failure:\n{}",
+        show(&out)
+    );
+
+    // Remote should not have moved.
+    assert_eq!(repo.remote_commit("main"), remote_before);
+
+    // No empty fixup commit should have been emitted, because the
+    // resulting tree was identical to the parent's tree.
+    assert!(
+        repo.rev_parse("refs/heads/jj-hooks-fixup/main").is_none(),
+        "no fixup ref should be created when the worktree's tree is unchanged"
+    );
+    assert!(
+        repo.fixup_commit_for("main").is_none(),
+        "no fixup commit should be addressable when the worktree's tree is unchanged"
     );
 }
 
