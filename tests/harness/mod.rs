@@ -348,6 +348,32 @@ repos:
         pass_filenames: false
 "#;
 
+/// A hook that touches the index without changing file content. The
+/// hook overwrites an existing tracked file with new content and
+/// then restores the original content. `git add -A` then notes the
+/// stat change in the index even though the file's final bytes
+/// hash to the same blob; `git status --porcelain` reports the
+/// file as modified; `git write-tree` produces a tree IDENTICAL to
+/// the parent.
+///
+/// This simulates the runner-touched-the-index-but-didn't-change-
+/// content false positive (issue #7), such as hk's stash + restore
+/// lifecycle on a check-only run. Without the content-addressed
+/// fixup gate, this would produce an empty fixup commit + abort
+/// the push.
+pub const PRE_PUSH_INDEX_TOUCH_ONLY: &str = r#"
+repos:
+  - repo: local
+    hooks:
+      - id: touch-only
+        name: touch-only
+        entry: sh -c 'cp existing.txt existing.txt.bak && echo "transient" > existing.txt && git add -A && cp existing.txt.bak existing.txt && rm existing.txt.bak'
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+"#;
+
 // -- lefthook fixtures --------------------------------------------------------
 //
 // Lefthook takes per-stage hooks under `<stage>:` and per-step commands
