@@ -121,7 +121,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             // the primary workspace. `--runner` overrides.
             let cli_runner: Option<Runner> = cli.runner.map(Into::into);
 
-            run_against_revset(&jj, &workspace_root, cli_runner, stage.into(), &revset)
+            run_for_revset(&jj, &workspace_root, cli_runner, stage.into(), &revset)
         }
 
         Command::Init => {
@@ -208,13 +208,58 @@ fn advance_bookmarks_from_config(jj: &JjCli) -> bool {
     )
 }
 
-fn run_against_revset(
+/// Run the configured hook runner against a jj revset, the same way
+/// `jj-hp run [REVSET]` does. Exposed as a library entrypoint so other
+/// tools (e.g. `jj-gt`) can gate their own pipelines on the same hook
+/// machinery without shelling out to the `jj-hp` binary.
+///
+/// Resolves the latest commit in `revset` as the "to" target and uses
+/// its parent as the "from" diff base. The hook backend is picked from
+/// the target commit's tree (so a runner-migration commit is gated by
+/// the runner the *target* commits to), unless `cli_runner` overrides.
+///
+/// Returns `ExitCode::SUCCESS` only when every hook step exits 0 *and*
+/// no fixup commit was produced (i.e. hooks didn't modify any files).
+/// Otherwise returns a non-zero exit code suitable for propagating from
+/// a binary's `main`.
+pub fn run_for_revset(
     jj: &JjCli,
     workspace_root: &std::path::Path,
     cli_runner: Option<Runner>,
     stage: Stage,
     revset: &str,
 ) -> Result<ExitCode, JjHooksError> {
+    match run_for_revset_outcome(jj, workspace_root, cli_runner, stage, revset)? {
+        None => {
+            eprintln!("jj-hooks: revset `{revset}` is empty");
+            Ok(ExitCode::from(2))
+        }
+        Some(outcome) => {
+            if let Some(commit) = &outcome.fixup_commit {
+                eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
+            }
+            if outcome.success && outcome.fixup_commit.is_none() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Ok(ExitCode::from(1))
+            }
+        }
+    }
+}
+
+/// Structured variant of [`run_for_revset`] — returns `Ok(None)` for
+/// an empty revset, otherwise the per-update [`hooks::HookOutcome`].
+///
+/// Callers (other binaries that compose jj-hooks into their own
+/// pipelines) typically want to branch on `outcome.success` and
+/// `outcome.fixup_commit` rather than parse an exit code.
+pub fn run_for_revset_outcome(
+    jj: &JjCli,
+    workspace_root: &std::path::Path,
+    cli_runner: Option<Runner>,
+    stage: Stage,
+    revset: &str,
+) -> Result<Option<hooks::HookOutcome>, JjHooksError> {
     let target = jj.run(&[
         "log",
         "--no-graph",
@@ -228,8 +273,7 @@ fn run_against_revset(
     ])?;
     let target = target.trim();
     if target.is_empty() {
-        eprintln!("jj-hooks: revset `{revset}` is empty");
-        return Ok(ExitCode::from(2));
+        return Ok(None);
     }
 
     let parent = jj.run(&[
@@ -255,13 +299,5 @@ fn run_against_revset(
 
     let primary_git_dir = jj::primary_git_dir(workspace_root)?;
     let outcome = hooks::run_for_update(jj, &primary_git_dir, cli_runner, stage, &update)?;
-
-    if let Some(commit) = &outcome.fixup_commit {
-        eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
-    }
-    if outcome.success && outcome.fixup_commit.is_none() {
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(ExitCode::from(1))
-    }
+    Ok(Some(outcome))
 }
