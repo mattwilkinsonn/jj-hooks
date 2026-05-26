@@ -1,4 +1,19 @@
-# jj-hooks
+# jj-hooks (archived)
+
+> [!IMPORTANT]
+> **This repo has been archived.** Development continues in the
+> [zireael](https://github.com/mattwilkinsonn/zireael) monorepo at
+> [`tools/jj-hooks/`](https://github.com/mattwilkinsonn/zireael/tree/main/tools/jj-hooks).
+>
+> - **Install:** `brew install mattwilkinsonn/zireael/jj-hooks` (or
+>   `cargo install jj-hooks` — the crate stays on crates.io).
+> - **Issues / PRs:** open them against
+>   [mattwilkinsonn/zireael](https://github.com/mattwilkinsonn/zireael/issues) with
+>   `jj-hooks` in the title.
+> - **Old tap:** `mattwilkinsonn/tap` is also archived. The new tap path is
+>   `mattwilkinsonn/zireael`.
+
+---
 
 Run [pre-commit](https://pre-commit.com/), [prek](https://github.com/j178/prek),
 [lefthook](https://github.com/evilmartians/lefthook), or
