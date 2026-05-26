@@ -9,7 +9,7 @@ mod harness;
 use harness::{
     HK_PRE_PUSH_AUTOFIX, HK_PRE_PUSH_FAILING, HK_PRE_PUSH_PASSING, LEFTHOOK_PRE_PUSH_AUTOFIX,
     LEFTHOOK_PRE_PUSH_FAILING, LEFTHOOK_PRE_PUSH_PASSING, PRE_PUSH_AUTOFIX, PRE_PUSH_FAILING,
-    PRE_PUSH_INDEX_TOUCH_ONLY, PRE_PUSH_PASSING, TestRepo, show,
+    PRE_PUSH_INDEX_TOUCH_ONLY, PRE_PUSH_PASSING, PRE_PUSH_RECORD_RANGE, TestRepo, show,
 };
 
 /// Sanity: harness builds a working primary + remote and `jj git push` works
@@ -734,4 +734,114 @@ fn runner_autodetect_skips_when_target_commit_has_no_config() {
         show(&out)
     );
     assert_eq!(repo.remote_commit("main").as_deref(), Some(head.as_str()));
+}
+
+#[test]
+fn run_for_revset_uses_full_range_for_multi_commit_revset() {
+    // Regression test for the bug where `run_for_revset_outcome`
+    // called `jj log -r '<revset>' --limit 1` and treated that
+    // single commit as the "to" target — so for a multi-commit
+    // revset like `main..tip`, hooks ran against only the tip's
+    // 1-commit parent→tip slice. Real-world fallout (sea-621
+    // stack): formatting drift introduced by middle commits
+    // sailed past the pre-push gate.
+    //
+    // Fix: the synthesized BookmarkUpdate now uses
+    // `roots(<revset>)-` as old_commit and `heads(<revset>)` as
+    // new_commit, so hooks see the full diff range.
+    //
+    // The fixture builds a 3-commit stack on top of main, runs
+    // `jj-hp run --stage pre-push 'main..tip-change-id'`, and
+    // asserts the hook saw FROM_REF=trunk_tip / TO_REF=stack_tip.
+    let repo = TestRepo::new();
+    repo.write_pre_commit_config(PRE_PUSH_RECORD_RANGE);
+
+    // Capture the trunk tip BEFORE we make any new commits — this
+    // is what the hook should see as FROM_REF after the fix.
+    let trunk_tip = repo
+        .jj(&[
+            "log",
+            "-r",
+            "main@origin",
+            "--no-graph",
+            "-T",
+            "commit_id",
+            "--ignore-working-copy",
+        ])
+        .stdout;
+    let trunk_tip = String::from_utf8_lossy(&trunk_tip).trim().to_owned();
+
+    // Three-commit stack: A → B → C, all touching different files
+    // so the worktree at C reflects work from every layer.
+    repo.write("commit_a.txt", "from A\n");
+    let out = repo.jj(&["commit", "-m", "commit A"]);
+    assert!(out.status.success(), "{}", show(&out));
+    repo.write("commit_b.txt", "from B\n");
+    let out = repo.jj(&["commit", "-m", "commit B"]);
+    assert!(out.status.success(), "{}", show(&out));
+    repo.write("commit_c.txt", "from C\n");
+    let out = repo.jj(&["commit", "-m", "commit C"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    // Capture the stack tip — what the hook should see as TO_REF.
+    // After `jj commit -m C` the working copy is now an empty
+    // child commit at @, so the tip of the stack is at @-.
+    let stack_tip = repo
+        .jj(&[
+            "log",
+            "-r",
+            "@-",
+            "--no-graph",
+            "-T",
+            "commit_id",
+            "--ignore-working-copy",
+        ])
+        .stdout;
+    let stack_tip = String::from_utf8_lossy(&stack_tip).trim().to_owned();
+
+    // Output path the hook will write to.
+    let out_dir = tempfile::tempdir().unwrap();
+    let out_path = out_dir.path().join("range");
+    let out_path_str = out_path.to_string_lossy().into_owned();
+
+    let out = repo.jj_hooks_with_env(
+        &[
+            "--runner",
+            "pre-commit",
+            "run",
+            "--stage",
+            "pre-push",
+            "main@origin..@-",
+        ],
+        &[("JJ_HOOKS_TEST_RANGE_OUT", &out_path_str)],
+    );
+    assert!(out.status.success(), "{}", show(&out));
+
+    let contents = std::fs::read_to_string(&out_path).unwrap_or_else(|e| {
+        panic!(
+            "hook didn't write to {}: {e}\n{}",
+            out_path.display(),
+            show(&out)
+        )
+    });
+    // Pre-commit truncates the to-ref to 12 chars in some
+    // versions; the from-ref is also passed through. We tolerate
+    // a prefix match in either direction.
+    let from_line = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("FROM="))
+        .unwrap_or_else(|| panic!("missing FROM= line in {contents:?}"));
+    let to_line = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("TO="))
+        .unwrap_or_else(|| panic!("missing TO= line in {contents:?}"));
+    assert!(
+        trunk_tip.starts_with(from_line) || from_line.starts_with(&trunk_tip),
+        "expected FROM_REF to be trunk tip `{trunk_tip}`, got `{from_line}`",
+    );
+    assert!(
+        stack_tip.starts_with(to_line) || to_line.starts_with(&stack_tip),
+        "expected TO_REF to be stack tip `{stack_tip}`, got `{to_line}`. \
+         If this is the middle commit's SHA, the multi-commit-range fix has regressed.",
+    );
 }

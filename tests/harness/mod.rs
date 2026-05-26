@@ -141,6 +141,23 @@ impl TestRepo {
             .unwrap()
     }
 
+    /// Same as `jj_hooks` but inject extra env vars before invocation.
+    /// Used by tests that need a hook script to see custom env (e.g.
+    /// the `PRE_PUSH_RECORD_RANGE` fixture's `JJ_HOOKS_TEST_RANGE_OUT`
+    /// output-path indirection).
+    pub fn jj_hooks_with_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        let bin = env!("CARGO_BIN_EXE_jj-hooks");
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
+            .current_dir(&self.primary)
+            .env("PRE_COMMIT_HOME", &self.pre_commit_home)
+            .env("JJ_HOOKS_LOG", "info");
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    }
+
     /// Read all refs matching a glob from the primary git dir.
     pub fn refs_matching(&self, glob: &str) -> Vec<String> {
         let out = Command::new("git")
@@ -368,6 +385,36 @@ repos:
       - id: touch-only
         name: touch-only
         entry: sh -c 'cp existing.txt existing.txt.bak && echo "transient" > existing.txt && git add -A && cp existing.txt.bak existing.txt && rm existing.txt.bak'
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+"#;
+
+/// A pre-push hook that records the FROM_REF / TO_REF env vars
+/// pre-commit passes it into a file at `$JJ_HOOKS_TEST_RANGE_OUT`.
+/// Used to assert what diff range jj-hooks computed for a given
+/// revset — regression test for the bug where
+/// `run_for_revset_outcome` only checked the tip slice of a
+/// multi-commit revset instead of the full range.
+///
+/// The test sets `JJ_HOOKS_TEST_RANGE_OUT` to an absolute tempfile
+/// path before invoking `jj-hp run`; the env var propagates
+/// through `Command::new` → pre-commit → the hook shell.
+///
+/// Output file format (one var per line):
+///
+/// ```text
+/// FROM=<sha>
+/// TO=<sha>
+/// ```
+pub const PRE_PUSH_RECORD_RANGE: &str = r#"
+repos:
+  - repo: local
+    hooks:
+      - id: record-range
+        name: record-range
+        entry: sh -c 'printf "FROM=%s\nTO=%s\n" "$PRE_COMMIT_FROM_REF" "$PRE_COMMIT_TO_REF" > "$JJ_HOOKS_TEST_RANGE_OUT"'
         language: system
         stages: [pre-push]
         always_run: true

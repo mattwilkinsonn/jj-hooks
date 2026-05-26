@@ -253,6 +253,23 @@ pub fn run_for_revset(
 /// Callers (other binaries that compose jj-hooks into their own
 /// pipelines) typically want to branch on `outcome.success` and
 /// `outcome.fixup_commit` rather than parse an exit code.
+///
+/// The synthesized [`bookmark_updates::BookmarkUpdate`] uses the
+/// *full revset* as the diff range:
+///
+/// - `new_commit` (the "to" / target tree the hooks see) is the
+///   single head of the revset (`heads(<revset>)`). A multi-head
+///   revset is rejected upstream — the worktree we materialise to
+///   run hooks against can only be one commit.
+/// - `old_commit` (the "from" / diff base the hooks compare
+///   against) is the parent of the lowest commit in the revset
+///   (`roots(<revset>)-`). For `main..tip` this is `main` itself,
+///   so hooks see the entire stack diff `main..tip` — same as what
+///   `git push origin tip` would push.
+///
+/// For single-commit revsets like `@` or `<sha>` this reduces to
+/// `parent → target`, the same shape the old per-tip implementation
+/// produced.
 pub fn run_for_revset_outcome(
     jj: &JjCli,
     workspace_root: &std::path::Path,
@@ -260,11 +277,19 @@ pub fn run_for_revset_outcome(
     stage: Stage,
     revset: &str,
 ) -> Result<Option<hooks::HookOutcome>, JjHooksError> {
+    // Head of the revset = the tip commit. `heads(...)` returns the
+    // unique commit in the set that no other commit in the set is
+    // an ancestor of; for a linear chain this is the topmost
+    // commit. For a multi-head revset jj will return multiple
+    // results; we limit to 1 and let the caller surface a
+    // confusing-but-not-wrong outcome rather than failing here
+    // (multi-head pre-push checks aren't a workflow this library
+    // tries to support).
     let target = jj.run(&[
         "log",
         "--no-graph",
         "-r",
-        revset,
+        &format!("heads({revset})"),
         "-T",
         "commit_id",
         "--limit",
@@ -276,11 +301,16 @@ pub fn run_for_revset_outcome(
         return Ok(None);
     }
 
+    // From-ref = parent of the lowest commit in the revset. For
+    // `main..tip` this resolves to `main` itself, so hooks see the
+    // entire stack range. For single-commit revsets like `@`,
+    // `roots(@)-` reduces to `@-` — same shape the old code
+    // produced.
     let parent = jj.run(&[
         "log",
         "--no-graph",
         "-r",
-        &format!("{target}-"),
+        &format!("roots({revset})-"),
         "-T",
         "commit_id",
         "--limit",
