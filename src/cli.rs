@@ -45,6 +45,14 @@ pub enum Command {
         /// Only display what will change on the remote.
         #[arg(long)]
         dry_run: bool,
+
+        /// Disable the post-fixup retry. By default, when hooks fail
+        /// AND produce a fixup commit, jj-hooks re-runs the hook
+        /// backend against the fixup; if the re-run is clean, the
+        /// push proceeds and a warning is printed. Pass this flag to
+        /// restore pre-0.3.0 behavior (any failure aborts immediately).
+        #[arg(long)]
+        no_retry_after_fixup: bool,
     },
 
     /// Run hooks against a revset without pushing.
@@ -56,6 +64,46 @@ pub enum Command {
         /// Revset to check. Defaults to `@`.
         #[arg(default_value = "@")]
         revset: String,
+
+        /// Disable the post-fixup retry. See `push --no-retry-after-fixup`.
+        #[arg(long)]
+        no_retry_after_fixup: bool,
+
+        /// Run hooks against every tracked file, ignoring the revset's
+        /// diff range. Each runner's own equivalent flag is used:
+        /// `--all-files` for pre-commit/prek/lefthook, `--glob '*'` for
+        /// hk (its own `-a/--all` doesn't actually override stage-hook
+        /// ref bounds in v1.45.0). Useful when you want to lint
+        /// everything once (e.g. after a refactor that touched a lot)
+        /// without crafting a revset that happens to cover every gated
+        /// step. The setup pipeline still runs; the runner just sees no
+        /// `--from-ref`/`--to-ref`.
+        #[arg(long)]
+        all_files: bool,
+    },
+
+    /// Push jj tags to a git remote. jj has no native `jj git push --tag`,
+    /// so this exports refs to the colocated git repo and shells out to
+    /// `git push refs/tags/<tag>` for each requested tag.
+    PushTags {
+        /// Tag name(s) to push. Mutually exclusive with `--all`.
+        tags: Vec<String>,
+
+        /// Push every local tag.
+        #[arg(long, conflicts_with = "tags")]
+        all: bool,
+
+        /// Force-push the tag refs (overwrites the remote). Use sparingly.
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        /// Print the commands without running them.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
+        /// Git remote to push to.
+        #[arg(long, default_value = "origin")]
+        remote: String,
     },
 
     /// Interactive setup: install `jj push` alias and configure defaults.
@@ -111,10 +159,6 @@ pub struct PushArgs {
     #[arg(long)]
     pub deleted: bool,
 
-    /// Allow pushing new bookmarks (i.e. bookmarks not yet on the remote).
-    #[arg(long)]
-    pub allow_new: bool,
-
     /// Pass-through args after `--` forwarded to `jj git push` verbatim.
     #[arg(last = true)]
     pub passthrough: Vec<String>,
@@ -150,9 +194,6 @@ pub fn push_argv(args: &PushArgs, dry_run: bool) -> Vec<String> {
     }
     if args.deleted {
         out.push("--deleted".into());
-    }
-    if args.allow_new {
-        out.push("--allow-new".into());
     }
     if dry_run {
         out.push("--dry-run".into());

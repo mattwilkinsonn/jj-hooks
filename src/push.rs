@@ -5,7 +5,7 @@ use std::process::Command;
 
 use crate::bookmark_updates::{BookmarkUpdate, UpdateType, parse_git_push_dry_run};
 use crate::error::{JjHooksError, Result};
-use crate::hooks::{HookOutcome, run_for_update};
+use crate::hooks::{HookOutcome, RunOpts, run_for_update};
 use crate::jj::{self, JjCli};
 use crate::runner::{Runner, Stage};
 
@@ -42,6 +42,7 @@ pub fn run_checks(
     cli_runner: Option<Runner>,
     stage: Stage,
     push_args: &[String],
+    run_opts: RunOpts,
 ) -> Result<PushReport> {
     let updates = dry_run_updates(jj, push_args)?;
 
@@ -74,7 +75,15 @@ pub fn run_checks(
             Some(r) => tracing::info!("{update}: running {} hooks", r.bin()),
             None => tracing::info!("{update}: autodetecting runner inside target worktree"),
         }
-        let outcome = run_for_update(jj, &primary_git_dir, cli_runner, stage, &update)?;
+        let outcome = run_for_update(
+            jj,
+            &primary_git_dir,
+            workspace_root,
+            cli_runner,
+            stage,
+            &update,
+            run_opts,
+        )?;
         per_bookmark.push((update, outcome));
     }
 
@@ -220,13 +229,12 @@ mod tests {
             &[
                 "-b".into(),
                 "feature".into(),
-                "--allow-new".into(),
                 "--remote".into(),
                 "origin".into(),
             ],
             false,
         );
-        for needle in ["-b", "feature", "--allow-new", "--remote", "origin"] {
+        for needle in ["-b", "feature", "--remote", "origin"] {
             assert!(
                 argv.iter().any(|a| a == needle),
                 "expected `{needle}` in argv: {argv:?}"

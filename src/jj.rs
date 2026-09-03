@@ -67,7 +67,12 @@ impl JjCli {
 
     pub fn workspace_root(&self) -> Result<PathBuf> {
         let out = self.run(&["workspace", "root", "--ignore-working-copy"])?;
-        Ok(PathBuf::from(out.trim()).canonicalize()?)
+        // `dunce::canonicalize` resolves symlinks like `std::fs::canonicalize`
+        // but strips the Windows `\\?\` verbatim prefix when the path fits the
+        // classic form. Git-for-Windows rejects `\\?\`-prefixed `--git-dir`
+        // values with "not a git repository", so every path we hand to git
+        // must go through dunce, not std. See issue #94.
+        Ok(dunce::canonicalize(PathBuf::from(out.trim()))?)
     }
 }
 
@@ -89,7 +94,7 @@ pub fn primary_git_dir(workspace_root: &Path) -> Result<PathBuf> {
     let relative = std::fs::read_to_string(&target_file)?;
     let relative = relative.trim();
 
-    let resolved = store.join(relative).canonicalize().map_err(|e| {
+    let resolved = dunce::canonicalize(store.join(relative)).map_err(|e| {
         JjHooksError::Io(std::io::Error::new(
             e.kind(),
             format!(
@@ -108,13 +113,13 @@ fn resolve_repo_dir(workspace_root: &Path) -> Result<PathBuf> {
     let repo = workspace_root.join(".jj/repo");
     let meta = std::fs::metadata(&repo)?;
     if meta.is_dir() {
-        return Ok(repo.canonicalize()?);
+        return Ok(dunce::canonicalize(&repo)?);
     }
     let pointer = std::fs::read_to_string(&repo)?;
     let pointer = pointer.trim();
-    Ok(repo
-        .parent()
-        .expect(".jj/repo always has a parent")
-        .join(pointer)
-        .canonicalize()?)
+    Ok(dunce::canonicalize(
+        repo.parent()
+            .expect(".jj/repo always has a parent")
+            .join(pointer),
+    )?)
 }

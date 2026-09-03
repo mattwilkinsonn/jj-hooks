@@ -7,16 +7,20 @@ pub mod bookmark_updates;
 pub mod cli;
 pub mod completions;
 pub mod error;
+pub mod gate_cache;
 pub mod hooks;
 pub mod init;
 pub mod jj;
 pub mod push;
+pub mod push_tags;
+pub mod repo_env;
 pub mod runner;
+pub mod setup;
 pub mod worktree;
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::FromArgMatches;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
@@ -37,7 +41,31 @@ pub fn run() -> ExitCode {
     use clap::CommandFactory;
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
-    let cli = Cli::parse();
+    // Dispatch CLI parsing through a command whose `name` matches the
+    // invoked binary name (argv[0]'s file_name). Both `jj-hooks` and
+    // `jj-hp` share this entrypoint, so without this swap clap's
+    // `#[command(name = "jj-hooks")]` would make `jj-hp --version` print
+    // `jj-hooks 0.3.x` — wrong identifier, and the homebrew tap formula
+    // test catches it. Bonus: `--help` headers are also self-correct.
+    let bin_name = std::env::args()
+        .next()
+        .and_then(|arg0| {
+            std::path::Path::new(&arg0)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "jj-hooks".into());
+    // clap's `Command::name`/`bin_name` require `Into<Str>` which only
+    // accepts `&'static str` (not `&str` with a shorter lifetime). The
+    // `bin_name` String is built from argv[0] at runtime; leak it once
+    // so the slice satisfies the lifetime bound. The leak is process-
+    // lifetime (one allocation per `run()` call, which is at most one
+    // per process), so it's effectively free.
+    let bin_name_static: &'static str = Box::leak(bin_name.into_boxed_str());
+    let cmd = Cli::command()
+        .name(bin_name_static)
+        .bin_name(bin_name_static);
+    let cli = Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|e| e.exit());
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -65,6 +93,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             stage,
             push,
             dry_run,
+            no_retry_after_fixup,
         } => {
             let workspace_root = jj.workspace_root()?;
             // Argv that's just the bookmark selection (no --dry-run) — used
@@ -83,7 +112,26 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             // overrides this for users who need to force a specific runner.
             let cli_runner: Option<Runner> = cli.runner.map(Into::into);
 
-            let report = run_checks(&jj, &workspace_root, cli_runner, stage.into(), &select_argv)?;
+            let run_opts = crate::hooks::RunOpts {
+                retry_after_fixup: !no_retry_after_fixup,
+                // push always uses the diff range — the bookmark's ref
+                // bounds are the whole point.
+                all_files: false,
+                // jj-hp push is a single-bookmark CLI invocation; the
+                // user wants the runner's live progress bar in their
+                // terminal. Capture is only needed by the multi-update
+                // parallel batch API used by jj-gt.
+                capture_output: false,
+            };
+
+            let report = run_checks(
+                &jj,
+                &workspace_root,
+                cli_runner,
+                stage.into(),
+                &select_argv,
+                run_opts,
+            )?;
 
             if report.skipped {
                 execute_push(&jj, &push_argv, false)?;
@@ -93,9 +141,39 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             for (update, outcome) in &report.per_bookmark {
                 if !outcome.success {
                     eprintln!("jj-hooks: {update}: hook failed");
+                    // Setup-step failures synthesize a `captured_output`
+                    // buffer (the captured stdout/stderr plus a
+                    // trailing line naming the failing step) so the
+                    // user has the context they need to fix it.
+                    // Regular hook failures in live (non-capture) mode
+                    // have already streamed their output to the
+                    // terminal, so they have `captured_output: None`
+                    // here. Either way: dump the buffer when present.
+                    if let Some(captured) = &outcome.captured_output {
+                        for line in captured.lines() {
+                            eprintln!("│ {line}");
+                        }
+                    }
                 }
                 if let Some(commit) = &outcome.fixup_commit {
-                    eprintln!("jj-hooks: {update}: hooks modified files (fixup commit {commit})");
+                    if outcome.success && outcome.retried {
+                        // Final state is good — the retry on the fixup
+                        // was clean — but the initial run failed, so
+                        // warn the user about the racy step.
+                        eprintln!(
+                            "jj-hooks: {update}: hooks modified files; re-run on fixup commit \
+                             was clean (fixup {commit})"
+                        );
+                    } else {
+                        eprintln!(
+                            "jj-hooks: {update}: hooks modified files (fixup commit {commit})"
+                        );
+                    }
+                } else if outcome.success && outcome.initial_failure {
+                    // Edge case: initial run failed without producing a
+                    // fixup, retry-after-fixup never triggered. Surface
+                    // the initial failure for context.
+                    eprintln!("jj-hooks: {update}: initial hook run reported a failure");
                 }
             }
 
@@ -105,6 +183,11 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
                 eprintln!("jj-hooks: advanced bookmark {name} to fixup commit");
             }
 
+            // Abort when any bookmark either fails outright or has a
+            // fixup commit the user hasn't squashed in yet. A successful
+            // retry-after-fixup still produces a fixup_commit (the user
+            // needs to advance the bookmark to it before re-pushing), so
+            // it correctly aborts here.
             if report.any_failure() || report.any_fixup() {
                 eprintln!("jj-hooks: aborting push");
                 return Ok(ExitCode::from(1));
@@ -114,14 +197,52 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             Ok(ExitCode::SUCCESS)
         }
 
-        Command::Run { stage, revset } => {
+        Command::Run {
+            stage,
+            revset,
+            no_retry_after_fixup,
+            all_files,
+        } => {
             let workspace_root = jj.workspace_root()?;
             // Same per-worktree autodetect contract as the push path: the
             // runner is picked from the target commit's own tree, not from
             // the primary workspace. `--runner` overrides.
             let cli_runner: Option<Runner> = cli.runner.map(Into::into);
 
-            run_for_revset(&jj, &workspace_root, cli_runner, stage.into(), &revset)
+            let run_opts = crate::hooks::RunOpts {
+                retry_after_fixup: !no_retry_after_fixup,
+                all_files,
+                capture_output: false,
+            };
+
+            run_for_revset(
+                &jj,
+                &workspace_root,
+                cli_runner,
+                stage.into(),
+                &revset,
+                run_opts,
+            )
+        }
+
+        Command::PushTags {
+            tags,
+            all,
+            force,
+            dry_run,
+            remote,
+        } => {
+            push_tags::run(
+                &jj,
+                push_tags::PushTagsOpts {
+                    remote: &remote,
+                    tags,
+                    all,
+                    force,
+                    dry_run,
+                },
+            )?;
+            Ok(ExitCode::SUCCESS)
         }
 
         Command::Init => {
@@ -228,15 +349,25 @@ pub fn run_for_revset(
     cli_runner: Option<Runner>,
     stage: Stage,
     revset: &str,
+    opts: hooks::RunOpts,
 ) -> Result<ExitCode, JjHooksError> {
-    match run_for_revset_outcome(jj, workspace_root, cli_runner, stage, revset)? {
+    match run_for_revset_outcome(jj, workspace_root, cli_runner, stage, revset, opts)? {
         None => {
             eprintln!("jj-hooks: revset `{revset}` is empty");
             Ok(ExitCode::from(2))
         }
         Some(outcome) => {
             if let Some(commit) = &outcome.fixup_commit {
-                eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
+                if outcome.success && outcome.retried {
+                    eprintln!(
+                        "jj-hooks: hooks modified files; re-run on fixup commit was clean \
+                         (fixup {commit})"
+                    );
+                } else {
+                    eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
+                }
+            } else if outcome.success && outcome.initial_failure {
+                eprintln!("jj-hooks: initial hook run reported a failure");
             }
             if outcome.success && outcome.fixup_commit.is_none() {
                 Ok(ExitCode::SUCCESS)
@@ -276,6 +407,7 @@ pub fn run_for_revset_outcome(
     cli_runner: Option<Runner>,
     stage: Stage,
     revset: &str,
+    opts: hooks::RunOpts,
 ) -> Result<Option<hooks::HookOutcome>, JjHooksError> {
     // Head of the revset = the tip commit. `heads(...)` returns the
     // unique commit in the set that no other commit in the set is
@@ -328,6 +460,14 @@ pub fn run_for_revset_outcome(
     };
 
     let primary_git_dir = jj::primary_git_dir(workspace_root)?;
-    let outcome = hooks::run_for_update(jj, &primary_git_dir, cli_runner, stage, &update)?;
+    let outcome = hooks::run_for_update(
+        jj,
+        &primary_git_dir,
+        workspace_root,
+        cli_runner,
+        stage,
+        &update,
+        opts,
+    )?;
     Ok(Some(outcome))
 }

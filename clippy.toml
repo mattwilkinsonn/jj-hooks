@@ -1,0 +1,3 @@
+# Workspace-wide clippy config. Per-tool overrides go in each
+# package's Cargo.toml under `[lints]`.
+msrv = "1.89"

@@ -1,18 +1,66 @@
-name: Release
+name: release
+
+# Triggered by pushing a version tag (`jj git push --tag v0.3.12`).
+#
+# Builds release artifacts for jj-hooks, attaches them to a GitHub
+# Release, bumps Formula/jj-hooks.rb in-place, and publishes the Rust
+# crate to crates.io.
 
 "on":
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re-)build a release for. Must already exist."
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write  # needed to create the GitHub Release + upload assets
+  contents: read
 
 jobs:
-  build:
-    name: Build ${{ matrix.target_name }}
+  # ----- Compute the version we're releasing.
+  meta:
+    name: Compute release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              tag="${{ inputs.tag }}"
+          else
+              tag="${GITHUB_REF_NAME}"
+          fi
+          version="${tag#v}"
+          if [[ "$tag" == *-* ]]; then
+              prerelease=true
+          else
+              prerelease=false
+          fi
+          {
+              echo "tag=${tag}"
+              echo "version=${version}"
+              echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+  # ----- Build the Rust binaries (jj-hooks, jj-hp).
+  #
+  # Per-target matrix keyed on (target_name, runs_on, rust_target).
+  # macOS-latest is Apple Silicon (arm64); Linux runners cover x64
+  # and arm64 separately. Both binaries build in one cargo invocation
+  # per target, so we don't pay setup cost twice per platform.
+  build-rust:
+    name: Build Rust (${{ matrix.target_name }})
+    needs: [meta]
     strategy:
       fail-fast: false
       matrix:
@@ -27,8 +75,9 @@ jobs:
             runs_on: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         run: |
@@ -39,85 +88,148 @@ jobs:
         with:
           shared-key: "release-${{ matrix.target_name }}"
 
-      - name: Build release binaries
-        run: cargo build --release --bin jj-hooks --bin jj-hp --target ${{ matrix.rust_target }}
-
-      - name: Stage artifacts
-        id: stage
+      - name: Build release binaries (jj-hooks, jj-hp)
         run: |
-          stage="$RUNNER_TEMP/jj-hooks-${{ github.ref_name }}-${{ matrix.target_name }}"
+          cargo build --release --target ${{ matrix.rust_target }} \
+              --bin jj-hooks --bin jj-hp
+
+      # ----- Stage + tar jj-hooks' artifacts.
+      #
+      # The tool gets its own tarball named after the slug the
+      # Homebrew formula expects:
+      #   jj-hooks-v<X>-<slug>.tar.gz  (contains jj-hooks + jj-hp)
+      #
+      # Codesigning on macOS is ad-hoc (`codesign -s -`) so the
+      # binary doesn't get the "downloaded from internet" quarantine
+      # warning. Real Developer-ID signing needs an Apple cert pair
+      # in secrets and is out-of-scope for an MVP-stage release.
+      - name: Stage jj-hooks artifacts
+        id: stage_jj_hooks
+        run: |
+          set -euo pipefail
+          ver="${{ needs.meta.outputs.version }}"
+          stage="$RUNNER_TEMP/jj-hooks-v${ver}-${{ matrix.target_name }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.rust_target }}/release/jj-hooks" "$stage/"
           cp "target/${{ matrix.rust_target }}/release/jj-hp" "$stage/"
-          cp README.md LICENSE "$stage/" 2>/dev/null || true
+          cp README.md "$stage/"
+          cp LICENSE-MIT LICENSE-APACHE "$stage/"
           echo "dir=$stage" >> "$GITHUB_OUTPUT"
 
-      # Ad-hoc codesigning on macOS so the binary doesn't get the
-      # "downloaded from internet" quarantine warning when first run.
-      # Real Developer-ID signing would require an Apple cert pair in
-      # GitHub secrets — out of scope for an MVP-stage tool.
       - name: Codesign (macOS)
         if: runner.os == 'macOS'
         run: |
-          codesign -s - "${{ steps.stage.outputs.dir }}/jj-hooks"
-          codesign -s - "${{ steps.stage.outputs.dir }}/jj-hp"
+          codesign -s - "${{ steps.stage_jj_hooks.outputs.dir }}/jj-hooks"
+          codesign -s - "${{ steps.stage_jj_hooks.outputs.dir }}/jj-hp"
 
-      - name: Tar + checksum
+      - name: Tar + sha256
         id: pack
         run: |
-          stage="${{ steps.stage.outputs.dir }}"
-          cd "$(dirname "$stage")"
-          base="$(basename "$stage")"
-          tar -czf "$base.tar.gz" "$base"
-          shasum -a 256 "$base.tar.gz" > "$base.tar.gz.sha256"
-          echo "tarball=$(dirname "$stage")/$base.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=$(dirname "$stage")/$base.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          ver="${{ needs.meta.outputs.version }}"
+          stage="$RUNNER_TEMP/jj-hooks-v${ver}-${{ matrix.target_name }}"
+          tar -C "$(dirname "$stage")" -czf "$stage.tar.gz" "$(basename "$stage")"
+          shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"
 
-      - name: Upload artifact to workflow
-        uses: actions/upload-artifact@v4
+      - name: Upload Rust artifacts
+        uses: actions/upload-artifact@v7
         with:
-          name: jj-hooks-${{ github.ref_name }}-${{ matrix.target_name }}
+          name: rust-${{ matrix.target_name }}
           path: |
-            ${{ steps.pack.outputs.tarball }}
-            ${{ steps.pack.outputs.checksum }}
+            ${{ runner.temp }}/jj-hooks-v*.tar.gz
+            ${{ runner.temp }}/jj-hooks-v*.sha256
+          if-no-files-found: error
 
-  publish:
+  # ----- Create the GitHub Release and attach every tarball.
+  publish-release:
     name: Publish GitHub Release
-    needs: build
+    needs: [meta, build-rust]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v6
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
       - name: Flatten artifacts
         run: |
+          set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) \
+              -exec cp {} release/ \;
           ls -la release
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" \
-            --notes "Release ${{ github.ref_name }}." \
-            --verify-tag \
-            release/jj-hooks-*.tar.gz \
-            release/jj-hooks-*.sha256
+          set -euo pipefail
+          args=(
+            --repo "$GITHUB_REPOSITORY"
+            --title "$TAG"
+            --notes "Release $TAG. See CHANGELOG.md for details."
+            --verify-tag
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}" \
+              release/jj-hooks-v*.tar.gz \
+              release/jj-hooks-v*.sha256
 
+  # ----- Bump Formula/jj-hooks.rb with the new version + sha256s.
   bump-tap:
     name: Bump Homebrew tap formula
-    needs: publish
+    needs: [meta, build-rust, publish-release]
     runs-on: ubuntu-latest
-    # Skip on pre-releases (rc/alpha/beta) — tap should track stable only.
-    if: ${{ !contains(github.ref_name, '-') }}
+    # Skip prereleases — tap should only track stable.
+    if: needs.meta.outputs.prerelease == 'false'
+    timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
-      - name: Download release checksums
-        uses: actions/download-artifact@v4
+      # Mint a short-lived (~1 hour) installation token for the
+      # zireael-release GitHub App. The App is in the bypass actors
+      # list for the main-branch ruleset, so its pushes skip the
+      # PR-required + status-checks-required gates. Default
+      # GITHUB_TOKEN can't push to main (correctly — it's the same
+      # cred every workflow gets, and you don't want every workflow
+      # bypassing branch protection).
+      #
+      # App configuration:
+      #   - App ID:        ${{ vars.RELEASE_BOT_APP_ID }}     (repo variable)
+      #   - Private key:   ${{ secrets.RELEASE_BOT_PRIVATE_KEY }} (repo secret)
+      #   - Permissions:   contents:write + metadata:read (least-privilege)
+      #   - Installed on:  this repo only
+      #   - Bypass actor:  main branch ruleset
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          # The workflow is triggered by a tag, but the tap bump must be
+          # committed on top of current main. Checking out the tag and
+          # pushing HEAD:main races any main update after the tag was cut
+          # and gets rejected as non-fast-forward.
+          ref: main
+          fetch-depth: 0
+          # Checkout with the App token so the local git remote carries it
+          # for the `git push` later. actions/checkout also writes this
+          # token into .git/config's extraheader, so plain `git push` Just
+          # Works without re-auth.
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -125,81 +237,97 @@ jobs:
         id: shas
         run: |
           set -euo pipefail
-          for slug in darwin-arm64 linux-x64 linux-arm64; do
-              file="artifacts/jj-hooks-${{ github.ref_name }}-${slug}/jj-hooks-${{ github.ref_name }}-${slug}.tar.gz.sha256"
-              sha=$(awk '{print $1}' "$file")
-              echo "${slug}=${sha}" >> "$GITHUB_OUTPUT"
+          ver="${{ needs.meta.outputs.version }}"
+          for tool in jj-hooks; do
+              for slug in darwin-arm64 linux-x64 linux-arm64; do
+                  # Find the .sha256 file; artifact-name prefix is rust-*
+                  # so just glob.
+                  file=$(find artifacts -name "${tool}-v${ver}-${slug}.tar.gz.sha256" | head -1)
+                  if [ -z "$file" ]; then
+                      echo "error: missing sha256 for ${tool} ${slug}" >&2
+                      exit 1
+                  fi
+                  sha=$(awk '{print $1}' "$file")
+                  echo "${tool}-${slug}=${sha}" >> "$GITHUB_OUTPUT"
+              done
           done
 
-      # Check out the tap repo using a PAT with `contents:write` on
-      # mattwilkinsonn/homebrew-tap. The PAT must be saved as the
-      # `HOMEBREW_TAP_TOKEN` secret on this repo.
-      - name: Checkout tap
-        uses: actions/checkout@v5
-        with:
-          repository: mattwilkinsonn/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: tap
-
-      - name: Rewrite formula
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import re, os
-          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
-          shas = {
-              "darwin-arm64": "${{ steps.shas.outputs.darwin-arm64 }}",
-              "linux-x64":   "${{ steps.shas.outputs.linux-x64 }}",
-              "linux-arm64": "${{ steps.shas.outputs.linux-arm64 }}",
-          }
-          path = "tap/Formula/jj-hooks.rb"
-          with open(path) as f:
-              text = f.read()
-          # Bump version.
-          text = re.sub(r'^  version ".*"$', f'  version "{version}"', text, flags=re.M)
-          # Bump each per-slug sha256 by anchoring on its url line.
-          for slug, sha in shas.items():
-              pattern = re.compile(
-                  rf'(url\s+"[^"]*-{slug}\.tar\.gz"\s*\n\s+sha256\s+)"[^"]*"'
-              )
-              text = pattern.sub(rf'\1"{sha}"', text)
-          with open(path, "w") as f:
-              f.write(text)
-          PY
+      - name: Rewrite the formula in-place
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+          # Pass every per-slug sha as one env var per entry. The
+          # python script reads them into a dict and rewrites the formula.
+          JJ_HOOKS_DARWIN_ARM64: ${{ steps.shas.outputs.jj-hooks-darwin-arm64 }}
+          JJ_HOOKS_LINUX_X64: ${{ steps.shas.outputs.jj-hooks-linux-x64 }}
+          JJ_HOOKS_LINUX_ARM64: ${{ steps.shas.outputs.jj-hooks-linux-arm64 }}
+        run: python3 .github/scripts/bump-formulae.py
 
       - name: Commit + push
-        working-directory: tap
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet; then
+          if git diff --quiet Formula/; then
               echo "nothing to bump"
               exit 0
           fi
-          git add Formula/jj-hooks.rb
-          git commit -m "jj-hooks ${GITHUB_REF_NAME}"
-          git push
+          # Author the commit as the App's bot identity. The App
+          # slug is `zireael-release` (visible at
+          # https://github.com/apps/zireael-release), so the noreply
+          # email follows the standard `<id>+<slug>[bot]@...` form.
+          # The numeric ID matches the App ID (vars.RELEASE_BOT_APP_ID)
+          # — every GitHub App gets a bot user with id == app_id.
+          git config user.name "zireael-release[bot]"
+          git config user.email "${{ vars.RELEASE_BOT_APP_ID }}+zireael-release[bot]@users.noreply.github.com"
+          git add Formula/
+          git commit -m "chore(tap): bump formulae to ${{ needs.meta.outputs.tag }}"
+          # Main can advance while the release builds artifacts. Rebase the
+          # formula bump over the latest main immediately before pushing so
+          # the bot push stays a fast-forward instead of leaving the tap stale.
+          git fetch origin main:refs/remotes/origin/main
+          git rebase origin/main
+          git push origin HEAD:main
 
-  publish-crate:
-    name: Publish to crates.io
-    needs: [publish, bump-tap]
-    runs-on: ubuntu-latest
-    # Skip on pre-releases (rc/alpha/beta) so we don't burn a version
-    # number on crates.io for something users shouldn't binstall.
-    if: ${{ !contains(github.ref_name, '-') }}
+  # ----- Validate the freshly published tap installs end-to-end.
+  validate-tap:
+    name: Validate tap (${{ matrix.os }})
+    needs: [meta, bump-tap]
+    if: needs.meta.outputs.prerelease == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
-      - uses: actions/checkout@v5
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Tap, install, and test the formula
+        run: |
+          set -euo pipefail
+          brew tap mattwilkinsonn/jj-hooks https://github.com/mattwilkinsonn/jj-hooks
+          brew trust mattwilkinsonn/jj-hooks
+          for formula in jj-hooks; do
+            echo "::group::${formula}"
+            brew install "mattwilkinsonn/jj-hooks/${formula}"
+            brew test "mattwilkinsonn/jj-hooks/${formula}"
+            echo "::endgroup::"
+          done
+
+  # ----- Publish to crates.io.
+  publish-crates:
+    name: Publish to crates.io
+    needs: [meta, build-rust, publish-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.meta.outputs.prerelease == 'false'
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install stable
 
-      # `cargo publish` is irreversible (versions can be yanked but never
-      # republished), so it goes last in the release sequence — only
-      # after the GitHub Release exists and the Homebrew formula bump
-      # succeeds. If any earlier step fails, this one doesn't run and
-      # the version number is preserved for a retry.
-      - name: cargo publish
+      - name: cargo publish jj-hooks
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
+        run: cargo publish -p jj-hooks --locked

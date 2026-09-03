@@ -1,1 +1,20 @@
-target/
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# devenv + direnv: generated shell artifacts + direnv cache. The devenv.{nix,yaml},
+# devenv.lock, and .envrc sources are committed.
+.devenv*
+.direnv/
+devenv.local.nix

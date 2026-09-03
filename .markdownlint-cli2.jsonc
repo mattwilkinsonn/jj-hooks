@@ -1,0 +1,37 @@
+// markdownlint-cli2 config. Used by both:
+//
+//   - The VSCode markdownlint extension (loads `.markdownlint*.{json,jsonc}`).
+//   - `markdownlint-cli2` invocations from CI / the `moon ci` gate.
+//
+// Mirrors the seal/jj-hooks/jj-gt shape — default-on with overrides.
+{
+	"config": {
+		// MD013 (line length): disabled. Hard wraps in prose are a writer's
+		// choice; the rule has no canonical auto-fix (sentence boundary?
+		// word boundary?) so the VSCode extension surfaces the diagnostic
+		// but never fixes it on save. We'd rather not chase the lint than
+		// soft-wrap every paragraph by hand.
+		"MD013": false,
+		// MD060 (table pipe spacing): enforce "compact" style — the
+		// table-pipe rule that aligns the separator row's leading/
+		// trailing pipes with the header's. Mismatched styles within
+		// one table are the most common author mistake.
+		"MD060": {
+			"style": "compact"
+		}
+	},
+	// Skip anything inside dependency / build / VCS dirs. Without this,
+	// bare `markdownlint-cli2 "**/*.md"` descends into
+	// tools/akiflow-cli/node_modules/@biomejs/biome/README.fr.md
+	// (a fully HTML-formatted README written by upstream biome) and
+	// dumps 50+ errors that aren't our problem.
+	"ignores": [
+		"**/node_modules/**",
+		"**/target/**",
+		"**/dist/**",
+		"**/.git/**",
+		"**/.jj/**",
+		"**/.direnv/**",
+		"**/.devenv/**"
+	]
+}

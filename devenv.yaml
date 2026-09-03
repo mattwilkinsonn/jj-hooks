@@ -1,0 +1,23 @@
+# devenv inputs. Rolling nixpkgs is devenv's recommended channel for dev shells.
+# rust-overlay builds the exact rust-toolchain.toml Rust pin (pure-eval, no hash file);
+# it is REDECLARED here per the dev-shared transitivity verdict (module inputs do NOT
+# compose transitively through imports:). hk (the pre-push hook runner) ships from its own
+# flake and is also a jj-hooks integration-test backend.
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  dev-shared:
+    url: github:mattwilkinsonn/dev-shared
+    flake: false
+  hk:
+    url: github:jdx/hk/v1.48.0
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+imports:
+  - dev-shared

@@ -1,47 +1,26 @@
-amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
-import "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Builtins.pkl"
+amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.pkl"
 
-// markdownlint-cli2 is the maintained replacement for the original
-// markdownlint CLI. hk's builtin still shells out to plain `markdownlint`,
-// so define the step ourselves to call cli2.
-local markdown_lint_cli2 = new Step {
-    glob = List("**/*.md", "**/*.markdown")
-    check = "markdownlint-cli2 {{ files }}"
-    fix = "markdownlint-cli2 --fix {{ files }}"
-}
+// Git hooks managed by hk (https://hk.jdx.dev). Installed on devenv shell entry
+// (`hk install`, idempotent) — the whole fresh-clone bootstrap is `direnv allow`.
+//
+// The pre-push gate is a thin shell over the local CI command: `devenv tasks run ci`
+// runs the crate fmt/clippy/nextest tasks plus the shared markdownlint/actionlint/
+// nixfmt/deadnix lint tasks. This is the same command CI runs (.github/workflows/ci.yml).
+//
+// Bypass knobs:
+//   HK=0 git push           // skip all hooks (emergency)
+//   git push --no-verify    // hk respects this too
 
-// Fast checks — run on pre-commit (and again on pre-push for completeness).
-local fastLinters = new Mapping<String, Step> {
-    ["cargo_fmt"] = Builtins.cargo_fmt
-    ["markdown_lint"] = markdown_lint_cli2
-    ["actionlint"] = Builtins.actionlint
-}
-
-// Slow checks — pre-push only. cargo_clippy compiles the whole crate, so
-// keeping it off the pre-commit path keeps `jj-hooks run` snappy for
-// per-change validation.
-local slowLinters = (fastLinters) {
-    ["cargo_clippy"] = Builtins.cargo_clippy
-}
+// Pin the default-branch reference so hk's affected-diff base resolves on fresh clones
+// and in CI (where refs/remotes/origin/HEAD isn't always set).
+default_branch = "main"
 
 hooks {
-    ["pre-commit"] {
-        fix = true
-        stash = "git"
-        steps = fastLinters
-    }
     ["pre-push"] {
-        // Auto-apply formatter fixes (cargo_fmt, markdown_lint) so the
-        // jj-hooks push pipeline picks them up as a fixup commit. Linters
-        // without a fix command (cargo_clippy, actionlint) just check.
-        fix = true
-        steps = slowLinters
-    }
-    ["fix"] {
-        fix = true
-        steps = fastLinters
-    }
-    ["check"] {
-        steps = slowLinters
+        steps {
+            ["ci"] = new Step {
+                check = "devenv tasks run ci"
+            }
+        }
     }
 }
