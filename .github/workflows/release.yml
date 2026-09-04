@@ -16,7 +16,7 @@ name: release
         required: true
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
@@ -43,10 +43,10 @@ jobs:
           set -euo pipefail
           if [ "$EVENT" = "workflow_dispatch" ]; then
               tag="$TAG_INPUT"
-              [[ "$tag" =~ ^v[0-9] ]] || { echo "error: tag must start with v followed by a digit" >&2; exit 1; }
           else
               tag="${GITHUB_REF_NAME}"
           fi
+          [[ "$tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || { echo "error: invalid tag: $tag" >&2; exit 1; }
           version="${tag#v}"
           if [[ "$tag" == *-* ]]; then
               prerelease=true
@@ -114,9 +114,11 @@ jobs:
       # in secrets and is out-of-scope for an MVP-stage release.
       - name: Stage jj-hooks artifacts
         id: stage_jj_hooks
+        env:
+          VER: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
-          ver="${{ needs.meta.outputs.version }}"
+          ver="$VER"
           stage="$RUNNER_TEMP/jj-hooks-v${ver}-${{ matrix.target_name }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.rust_target }}/release/jj-hooks" "$stage/"
@@ -133,9 +135,11 @@ jobs:
 
       - name: Tar + sha256
         id: pack
+        env:
+          VER: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
-          ver="${{ needs.meta.outputs.version }}"
+          ver="$VER"
           stage="$RUNNER_TEMP/jj-hooks-v${ver}-${{ matrix.target_name }}"
           tar -C "$(dirname "$stage")" -czf "$stage.tar.gz" "$(basename "$stage")"
           (cd "$(dirname "$stage")" && shasum -a 256 "$(basename "$stage").tar.gz" > "$(basename "$stage").tar.gz.sha256")
@@ -246,9 +250,11 @@ jobs:
 
       - name: Extract per-platform SHA256s
         id: shas
+        env:
+          VER: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
-          ver="${{ needs.meta.outputs.version }}"
+          ver="$VER"
           for tool in jj-hooks; do
               for slug in darwin-arm64 linux-x64 linux-arm64; do
                   # Find the .sha256 file; artifact-name prefix is rust-*
@@ -272,8 +278,9 @@ jobs:
           JJ_HOOKS_LINUX_X64: ${{ steps.shas.outputs.jj-hooks-linux-x64 }}
           JJ_HOOKS_LINUX_ARM64: ${{ steps.shas.outputs.jj-hooks-linux-arm64 }}
         run: python3 .github/scripts/bump-formulae.py
-
       - name: Commit + push
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
         run: |
           set -euo pipefail
           if git diff --quiet Formula/; then
@@ -289,7 +296,7 @@ jobs:
           git config user.name "zireael-release[bot]"
           git config user.email "${{ vars.RELEASE_BOT_APP_ID }}+zireael-release[bot]@users.noreply.github.com"
           git add Formula/
-          git commit -m "chore(tap): bump formulae to ${{ needs.meta.outputs.tag }}"
+          git commit -m "chore(tap): bump formulae to ${TAG}"
           # Main can advance while the release builds artifacts. Rebase the
           # formula bump over the latest main immediately before pushing so
           # the bot push stays a fast-forward instead of leaving the tap stale.

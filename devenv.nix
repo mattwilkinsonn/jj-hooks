@@ -34,13 +34,14 @@
     # Warm the pkl package cache for jj-hooks' hk integration tests: their fixtures `amends`
     # the hk pkl package from GitHub at test time, so a transient GitHub 502 flakes the suite.
     # Pre-fetch once here (a no-op once cached). Best-effort with retry; never blocks entry.
-    ok=0
+    _pkl_warm_ok=0
     for _ in 1 2 3; do
       ${pkgs.pkl}/bin/pkl download-package \
         "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0" \
-        >/dev/null 2>&1 && { ok=1; break; }
+        >/dev/null 2>&1 && { _pkl_warm_ok=1; break; }
       sleep 2
     done
-    [ "$ok" = 1 ] || echo "devenv: pkl hk-package warm failed; jj-hooks hk tests may fetch at runtime"
+    [ "$_pkl_warm_ok" = 1 ] || echo "devenv: pkl hk-package warm failed; jj-hooks hk tests may fetch at runtime"
+    unset _pkl_warm_ok
   '';
 }

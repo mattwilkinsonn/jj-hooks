@@ -20,9 +20,9 @@
 			"style": "compact"
 		}
 	},
-  // Skip anything inside dependency / build / VCS dirs. Without this,
-  // bare `markdownlint-cli2 "**/*.md"` descends into generated dependencies
-  // and reports errors that aren't part of this repository.
+	// Skip anything inside dependency / build / VCS dirs. Without this,
+	// bare `markdownlint-cli2 "**/*.md"` descends into generated dependencies
+	// and reports errors that aren't part of this repository.
 	"ignores": [
 		"**/node_modules/**",
 		"**/target/**",

@@ -285,7 +285,7 @@ versions your project pins, producing false-red gates (e.g. system biome
 where the `.envrc` is allowed — never the temp worktree), caches the result
 for the whole invocation, and merges that environment into every hook and
 setup-step subprocess before spawning. The local gate then runs in the same
-environment CI does (`devenv shell -- moon ci`). This works for any `.envrc`
+environment CI does (`devenv shell -- devenv tasks run ci`).
 — plain `direnv`, `use devenv`, and `source_env_if_exists .envrc.local`
 overrides alike — because it goes through direnv itself.
 
