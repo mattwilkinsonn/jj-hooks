@@ -56,16 +56,20 @@ def main() -> int:
             continue
 
         shas: dict[str, str] = {}
+        missing: list[str] = []
         for slug, env_slug in SLUGS.items():
             key = f"{env_prefix}_{env_slug}"
             value = os.environ.get(key, "").strip()
             if not value:
-                print(
-                    f"warn: missing {key} env var; will not bump {tool} {slug}",
-                    file=sys.stderr,
-                )
-                continue
-            shas[slug] = value
+                missing.append(slug)
+            else:
+                shas[slug] = value
+        if missing:
+            print(
+                f"error: missing {tool} sha256 env vars for slug(s): {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 1
 
         text = formula_path.read_text()
         original = text

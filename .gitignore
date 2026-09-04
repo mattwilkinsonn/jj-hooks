@@ -18,3 +18,4 @@ Thumbs.db
 .devenv*
 .direnv/
 devenv.local.nix
+.envrc.local

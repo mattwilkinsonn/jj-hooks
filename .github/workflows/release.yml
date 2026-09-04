@@ -15,6 +15,9 @@ name: release
         description: "Tag to (re-)build a release for. Must already exist."
         required: true
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
 
@@ -33,10 +36,14 @@ jobs:
       prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - id: tag
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              tag="${{ inputs.tag }}"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+              tag="$TAG_INPUT"
+              [[ "$tag" =~ ^v[0-9] ]] || { echo "error: tag must start with v followed by a digit" >&2; exit 1; }
           else
               tag="${GITHUB_REF_NAME}"
           fi
@@ -78,6 +85,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
 
       - name: Install Rust toolchain
         run: |
@@ -129,7 +138,7 @@ jobs:
           ver="${{ needs.meta.outputs.version }}"
           stage="$RUNNER_TEMP/jj-hooks-v${ver}-${{ matrix.target_name }}"
           tar -C "$(dirname "$stage")" -czf "$stage.tar.gz" "$(basename "$stage")"
-          shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"
+          (cd "$(dirname "$stage")" && shasum -a 256 "$(basename "$stage").tar.gz" > "$(basename "$stage").tar.gz.sha256")
 
       - name: Upload Rust artifacts
         uses: actions/upload-artifact@v7
@@ -150,6 +159,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -301,7 +312,7 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
+        uses: Homebrew/actions/setup-homebrew@3cdb78d0f62ad29dd32de765782654f4eedea607 # 2026.08.31.1
       - name: Tap, install, and test the formula
         run: |
           set -euo pipefail
@@ -317,12 +328,14 @@ jobs:
   # ----- Publish to crates.io.
   publish-crates:
     name: Publish to crates.io
-    needs: [meta, build-rust, publish-release]
+    needs: [meta, build-rust, publish-release, validate-tap]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: needs.meta.outputs.prerelease == 'false'
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
 
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install stable

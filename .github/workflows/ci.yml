@@ -1,6 +1,8 @@
 name: ci
 on:
   pull_request:
+  push:
+    branches: [main]
 jobs:
   ci:
     uses: mattwilkinsonn/dev-shared/.github/workflows/rust-devenv-ci.yml@v1

@@ -7,6 +7,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/mattwilkinsonn/jj-hooks"
 authors = ["Matt Wilkinson <mattwilki17@gmail.com>"]
 readme = "README.md"
+rust-version = "1.89"
+keywords = ["jj", "jujutsu", "git-hooks", "pre-commit"]
+categories = ["development-tools"]
 
 # cargo-binstall metadata. `cargo binstall jj-hooks` fetches the release
 # tarball matching the user's platform from this repo's GitHub Releases

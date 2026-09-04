@@ -1,5 +1,5 @@
 [toolchain]
-# Exact pin (not "stable") so devenv/fenix + CI share one derivation and caches
-# survive. fenix reads this file; bump the sha256 in devenv.nix on version bumps.
+# Exact pin so rust-overlay + CI share one derivation and caches survive.
+# rust-overlay reads this file; bump the channel here on version changes.
 channel = "1.96.0"
 components = ["rustfmt", "clippy"]

@@ -52,7 +52,9 @@ primary and secondary workspaces.
 cargo binstall jj-hooks
 ```
 
-This pulls a prebuilt binary from the GitHub Releases page — no compile step.
+This pulls a prebuilt binary from the GitHub Releases page for `darwin-arm64`,
+`linux-x64`, and `linux-arm64` — no compile step. Intel macOS is not prebuilt;
+use `cargo install --path .` to build from source.
 
 ### Via Homebrew tap
 
@@ -533,8 +535,8 @@ muscle memory.
 ## Development
 
 ```bash
-direnv allow              # one-time: devenv shell provides the hook-runner stack (pre-commit, prek, lefthook, hk, pkl) + rust/moon
-moon run jj-hooks:ci      # fmt + clippy + nextest
+direnv allow              # one-time: devenv shell provides the hook-runner stack (pre-commit, prek, lefthook, hk, pkl)
+devenv tasks run ci       # fmt + clippy + nextest
 ```
 
 The test suite includes integration tests that build real jj+git repos in
@@ -544,4 +546,6 @@ prek, lefthook, hk) has dedicated integration tests for pass/fail/autofix.
 
 ## License
 
-Apache-2.0.
+This project is dual-licensed under your choice of MIT
+([`LICENSE-MIT`](./LICENSE-MIT)) or Apache-2.0
+([`LICENSE-APACHE`](./LICENSE-APACHE)).
