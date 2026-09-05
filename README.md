@@ -54,14 +54,34 @@ cargo binstall jj-hooks
 
 This pulls a prebuilt binary from the GitHub Releases page for `darwin-arm64`,
 `linux-x64`, and `linux-arm64` — no compile step. Intel macOS is not prebuilt;
-use `cargo install --path .` to build from source.
+use `cargo install --path .` to build from source. From v0.3.12 onward,
+`cargo binstall jj-hooks` pulls from the standalone repository's Releases; older
+version pins fall back to a source build.
 
 ### Via Homebrew tap
 
 ```bash
-brew tap mattwilkinsonn/jj-hooks https://github.com/mattwilkinsonn/jj-hooks
-brew install mattwilkinsonn/jj-hooks/jj-hooks
+brew tap mattwilkinsonn/tap
+brew install mattwilkinsonn/tap/jj-hooks
 ```
+
+### Migrating from the zireael monorepo tap
+
+First remove the old keg and tap, then install from the consolidated tap:
+
+```bash
+brew uninstall jj-hooks
+brew untap mattwilkinsonn/zireael
+brew tap mattwilkinsonn/tap
+brew install mattwilkinsonn/tap/jj-hooks
+```
+
+For a per-tool tap, replace `mattwilkinsonn/zireael` with that tap's name.
+Homebrew refuses a same-name formula from a second tap while the old keg is
+installed. For `cargo binstall`, versions through 0.3.11 still have
+`{repo}`-relative download URLs and crates.io `repository` metadata pointing at
+the soon-private zireael monorepo, so they fall back to a slow source build.
+v0.3.12 is the first release re-anchored at this standalone repository.
 
 ### From source
 
