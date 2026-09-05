@@ -1,11 +1,12 @@
 # jj-hp gate: devenv worktree build-image failure — empirical root cause
 
 Empirical investigation (jj-hooks lane; carried over from the zireael monorepo
-at extraction as the findings sibling of the bootstrap pre-warm design record). Peer
-`org/service-owner` reported: pre-push `hk` gate's `ci:build-image-*-amd64` legs
-fail in the ephemeral `/tmp/jj-hooks-worktree-*` worktree with "Failed to
-evaluate devenv configuration" at `.devenv/bootstrap/default.nix`; blocked
-RIG-2569; worked around with `jj-vine --no-hooks`.
+at extraction as the findings sibling of the bootstrap pre-warm design record,
+`docs/designs/tools/jj-hp-gate-worktree-devenv-bootstrap.md`).
+Peer `org/service-owner` reported: pre-push `hk` gate's `ci:build-image-*-amd64`
+legs fail in the ephemeral `/tmp/jj-hooks-worktree-*` worktree with "Failed to
+evaluate devenv configuration" at `.devenv/bootstrap/default.nix`; blocked an
+internal tracker issue (RIG-2569); worked around with `jj-vine --no-hooks`.
 
 ## Peer's stated root cause — DISPROVEN
 
@@ -52,8 +53,8 @@ missing-file import.
 
 Could NOT force the race live on a warm store — the regen window is sub-ms and
 single-file writes appeared atomic in polling (0 partial/empty samples over
-~40k samples; 0 incremental-population windows over 6 trials). I did NOT destroy
-the shared nix store to force a cold-store repro. Root cause rests on: (1) the
+~40k samples; 0 incremental-population windows over 6 trials). The shared nix
+store was not destroyed to force a cold-store repro. Root cause rests on: (1) the
 disproof of the missing-dir theory, (2) proof that orion's DEVENV_DOTFILE
 isolation is ineffective, (3) proof bootstrap is not rewritten when present, and
 (4) exact symptom triangulation (worktree + parallel + cold). A cold-store live
@@ -73,6 +74,9 @@ repro would upgrade this from strongly-grounded to demonstrated.
 - **C:** both (A universal + B removes orion's false-confidence dead mitigation).
 
 ## Evidence locations
+
+`src/` paths are this repo; `ci/` paths are the orion consumer repo (RigelBuild,
+not carried into jj-hooks — cited to locate the consumer-side evidence).
 
 - jj-hp worktree creation: `src/worktree.rs:40-55` (detached, no `.devenv/`
   since gitignored: `.gitignore:18` `.devenv*`).

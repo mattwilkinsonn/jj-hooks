@@ -211,7 +211,7 @@ cited as established.
       );
   ```
 
-  And the newer twin `gate_cache.rs` (from #294/T1): opt-out read once at the
+  And the newer twin `gate_cache.rs` (from monorepo #294/T1): opt-out read once at the
   entrypoints (`gate_cache_enabled`, `gate_cache.rs:95-99`), decision cached
   process-globally keyed by canonicalized `workspace_root`
   (`gate_cache.rs:33-47`), applied by a low-level helper with no `JjCli` in
@@ -401,8 +401,8 @@ as a non-load-bearing deferral.
 (`setup::run_steps(...)`):
 
 - **Once per worktree**: `run_once` creates exactly one worktree per pass
-  (`hooks.rs:784` is the sole `Worktree::create` callsite — grepped this
-  session); every retry pass builds a fresh worktree and gets a fresh
+  (`hooks.rs:784` is the sole `Worktree::create` callsite in `src/` — the
+  other two are in `tests/workspace.rs`); every retry pass builds a fresh worktree and gets a fresh
   pre-warm.
 - **Before ANY subprocess in the worktree**: setup steps (`:805`) run user
   commands that may themselves invoke devenv; the hk Pkl warm (`:899-908`)
@@ -591,7 +591,7 @@ Test cycle: `cargo fmt -p jj-hooks -- --check`, `cargo clippy -p jj-hooks
 --all-targets -- -D warnings`, `cargo nextest run -p jj-hooks`, markdownlint
 on touched docs — all green (`rule://pre-finish-checks`). Driver-run
 acceptance: the T1 orion scenario re-verified on the released binary, and the
-orion lane unblocks RIG-2569 without `--no-hooks`.
+orion lane unblocks its internal tracker issue (RIG-2569) without `--no-hooks`.
 
 ## Tasks
 
@@ -631,7 +631,7 @@ with the designed-against assumption:
   skips and the first gate keeps today's cold-regen race exposure — exactly
   the status quo, never worse. Designed-against assumption: this population is
   effectively empty (direnv evaluates on first shell entry; OMP auto-allows;
-  jj-hp's own auto-allow from #294 resolves blocked clones). If Matt wants
+  jj-hp's own auto-allow from monorepo #294 resolves blocked clones). If Matt wants
   that edge closed too, the follow-up would be a serialized warming
   `devenv shell -- true`-style eval behind the same opt-out — deliberately NOT
   in this record (adds a devenv-binary PATH dependency + a multi-second
