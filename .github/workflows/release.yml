@@ -325,7 +325,7 @@ jobs:
               echo "error: tap/Formula/jj-hooks.rb is missing — refusing to ship a no-op bump" >&2
               exit 1
           fi
-          if grep -q 'disable!' tap/Formula/jj-hooks.rb; then
+          if grep -qE '^[[:space:]]*disable!' tap/Formula/jj-hooks.rb; then
               echo "error: tap/Formula/jj-hooks.rb is still disabled — refusing to bump it" >&2
               exit 1
           fi
