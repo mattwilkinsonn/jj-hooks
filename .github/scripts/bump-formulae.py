@@ -80,7 +80,7 @@ def main() -> int:
         original = text
 
         # version "X.Y.Z" → version "<new>"
-        text = re.sub(
+        text, version_n = re.subn(
             r'^(\s*version\s+)"[^"]*"',
             rf'\1"{version}"',
             text,
@@ -103,12 +103,20 @@ def main() -> int:
             text, n = pattern.subn(rf'\1"{sha}"', text)
             if n == 0:
                 unmatched.append(slug)
-        # Fail closed if a supplied sha did not land: the url-anchored
-        # regex matches nothing when a tap-side url line drifts shape, and
-        # re.subn then leaves the OLD sha in place while the version rewrite
-        # above still fires — shipping a version-bumped formula with a stale
-        # sha256 (a checksum-mismatch install for that platform). Abort
-        # before any write rather than push that to the shared tap.
+        # Fail closed if a supplied rewrite did not land. The url-anchored
+        # sha regex matches nothing when a tap-side url line drifts shape;
+        # the version anchor matches nothing when the version stanza drifts
+        # (e.g. single-quoted, or inlined into the urls). re.subn then leaves
+        # the OLD value while the sibling rewrite still fires — shipping a
+        # formula whose version and shas disagree (a checksum-mismatch
+        # install). Abort before any write rather than push that to the
+        # shared tap.
+        if version_n == 0:
+            print(
+                f"error: no version anchor matched in {formula_path}",
+                file=sys.stderr,
+            )
+            return 1
         if unmatched:
             print(
                 f"error: no sha256 anchor matched for {tool} slug(s): {', '.join(unmatched)}",
