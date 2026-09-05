@@ -4,6 +4,11 @@
 Called from .github/workflows/release.yml's `bump-tap` job after
 all platform builds have produced their SHA256 checksums.
 
+CWD-sensitive: resolves Formula/ relative to the current working
+directory. release.yml runs this with `working-directory: tap` so it
+rewrites the consolidated tap checkout, NOT this repo's in-repo
+Formula/. Do not switch to a `__file__`-relative path.
+
 Reads version + per-platform shas from env vars (passed by the
 workflow step) and rewrites each formula's `version` line + each
 per-slug `sha256` line in place. Anchors the sha256 rewrite on
@@ -75,7 +80,7 @@ def main() -> int:
         original = text
 
         # version "X.Y.Z" → version "<new>"
-        text = re.sub(
+        text, version_n = re.subn(
             r'^(\s*version\s+)"[^"]*"',
             rf'\1"{version}"',
             text,
@@ -88,13 +93,36 @@ def main() -> int:
         # initial formulae include a "# SHA256 is bumped by ..."
         # nudge above the first sha256, so without this we'd skip
         # the darwin-arm64 entry on the first release).
+        unmatched: list[str] = []
         for slug, sha in shas.items():
             pattern = re.compile(
                 rf'(url\s+"[^"]*-{re.escape(slug)}\.tar\.gz"\s*\n'
                 rf'(?:\s*(?:#[^\n]*)?\n)*'
                 rf'\s+sha256\s+)"[^"]*"'
             )
-            text = pattern.sub(rf'\1"{sha}"', text)
+            text, n = pattern.subn(rf'\1"{sha}"', text)
+            if n == 0:
+                unmatched.append(slug)
+        # Fail closed if a supplied rewrite did not land. The url-anchored
+        # sha regex matches nothing when a tap-side url line drifts shape;
+        # the version anchor matches nothing when the version stanza drifts
+        # (e.g. single-quoted, or inlined into the urls). re.subn then leaves
+        # the OLD value while the sibling rewrite still fires — shipping a
+        # formula whose version and shas disagree (a checksum-mismatch
+        # install). Abort before any write rather than push that to the
+        # shared tap.
+        if version_n == 0:
+            print(
+                f"error: no version anchor matched in {formula_path}",
+                file=sys.stderr,
+            )
+            return 1
+        if unmatched:
+            print(
+                f"error: no sha256 anchor matched for {tool} slug(s): {', '.join(unmatched)}",
+                file=sys.stderr,
+            )
+            return 1
 
         if text != original:
             formula_path.write_text(text)
