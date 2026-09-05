@@ -1,0 +1,12 @@
+name: devenv-update
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+jobs:
+  devenv-update:
+    uses: mattwilkinsonn/dev-shared/.github/workflows/devenv-update.yml@v1
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write # the Determinate Nix action needs OIDC

@@ -45,7 +45,7 @@ fn setup_primary_repo() -> (TempDir, PathBuf, String) {
 fn primary_git_dir_on_primary_workspace() {
     let (_tmp, primary, _) = setup_primary_repo();
     let resolved = jj::primary_git_dir(&primary).unwrap();
-    let expected = primary.join(".git").canonicalize().unwrap();
+    let expected = dunce::canonicalize(primary.join(".git")).unwrap();
     assert_eq!(resolved, expected);
 }
 
@@ -63,7 +63,10 @@ fn primary_git_dir_on_secondary_workspace() {
     let from_primary = jj::primary_git_dir(&primary).unwrap();
     let from_secondary = jj::primary_git_dir(&secondary).unwrap();
     assert_eq!(from_primary, from_secondary);
-    assert_eq!(from_primary, primary.join(".git").canonicalize().unwrap());
+    assert_eq!(
+        from_primary,
+        dunce::canonicalize(primary.join(".git")).unwrap()
+    );
 }
 
 #[test]
@@ -74,7 +77,7 @@ fn workspace_root_resolves_from_subdirectory() {
 
     let jj_cli = JjCli::new(&sub);
     let root = jj_cli.workspace_root().unwrap();
-    assert_eq!(root, primary.canonicalize().unwrap());
+    assert_eq!(root, dunce::canonicalize(&primary).unwrap());
 }
 
 #[test]

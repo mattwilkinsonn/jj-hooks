@@ -249,13 +249,11 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         &push_selected_lua_forms(),
     );
 
-    apply_action(
-        actions_arr,
-        push_state,
-        NEW_PUSH_NAME,
-        push_lua_forms()[0].to_owned(),
-        &mut added.added_jj_push,
-    );
+    // Selected first: same frequency-ordering rationale as jj-gt's
+    // SPECS array. jjui's `x`-prefix overlay surfaces candidates
+    // top-down in config order, so the daily "ship the focused
+    // bookmark" keystroke should land at index 0. Whole-stack
+    // push (`x P`) is the less-common operation and sits below.
     apply_action(
         actions_arr,
         push_selected_state,
@@ -263,8 +261,22 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         push_selected_lua_forms()[0].to_owned(),
         &mut added.added_jj_push_selected,
     );
+    apply_action(
+        actions_arr,
+        push_state,
+        NEW_PUSH_NAME,
+        push_lua_forms()[0].to_owned(),
+        &mut added.added_jj_push,
+    );
 
     // -- Bindings -----------------------------------------------------------
+    //
+    // Take a snapshot of the actions array NOW so the binding-
+    // migration helpers can consult it for managed-action checks
+    // without contending with the mutable borrow we need for
+    // `bindings`. Cheap — toml::Value clones are shallow-ish and
+    // the list has a handful of entries at most.
+    let actions_snapshot: Vec<toml::Value> = actions_arr.clone();
     let bindings = doc
         .entry("bindings")
         .or_insert_with(|| toml::Value::Array(Vec::new()));
@@ -273,9 +285,12 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         .ok_or_else(|| JjHooksError::Parse("jjui config: `bindings` is not an array".into()))?;
 
     // For each binding pointing at an old action name, rename its `action`
-    // field to the new name and update `desc`. (This is independent of
-    // whether the action itself got renamed — there could be a stale
-    // binding referencing an action we already renamed.)
+    // field to the new name and refresh `desc` IF AND ONLY IF the existing
+    // desc is one we've ever installed ourselves (or absent). User-customized
+    // desc text is preserved — pinning the binding action name alone is the
+    // unsurprising migration; clobbering display text the user typed is not.
+    // (This is independent of whether the action itself got renamed — there
+    // could be a stale binding referencing an action we already renamed.)
     for b in bindings_arr.iter_mut() {
         let Some(action) = b.get("action").and_then(|v| v.as_str()) else {
             continue;
@@ -283,7 +298,10 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
         if action == OLD_PUSH_NAME && push_state == ActionState::OldManaged {
             let table = b.as_table_mut().unwrap();
             table.insert("action".into(), toml::Value::String(NEW_PUSH_NAME.into()));
-            table.insert("desc".into(), toml::Value::String(NEW_PUSH_DESC.into()));
+            let existing_desc = table.get("desc").and_then(|v| v.as_str());
+            if existing_desc.is_none_or(|d| push_desc_managed_set().contains(&d)) {
+                table.insert("desc".into(), toml::Value::String(NEW_PUSH_DESC.into()));
+            }
         } else if action == OLD_PUSH_SELECTED_NAME && push_selected_state == ActionState::OldManaged
         {
             let table = b.as_table_mut().unwrap();
@@ -291,31 +309,93 @@ pub fn add_jjui_actions(existing: &str) -> Result<(String, AddedItems)> {
                 "action".into(),
                 toml::Value::String(NEW_PUSH_SELECTED_NAME.into()),
             );
-            table.insert(
-                "desc".into(),
-                toml::Value::String(NEW_PUSH_SELECTED_DESC.into()),
-            );
+            let existing_desc = table.get("desc").and_then(|v| v.as_str());
+            if existing_desc.is_none_or(|d| push_selected_desc_managed_set().contains(&d)) {
+                table.insert(
+                    "desc".into(),
+                    toml::Value::String(NEW_PUSH_SELECTED_DESC.into()),
+                );
+            }
         }
     }
 
-    // Add any missing bindings (idempotent).
-    if !bindings_has_action(bindings_arr, NEW_PUSH_NAME) {
-        bindings_arr.push(make_binding(
-            NEW_PUSH_NAME,
-            &["x", "p"],
-            "revisions",
-            NEW_PUSH_DESC,
-        ));
-        added.added_binding_x_p = true;
-    }
+    // Migrate `seq` for managed bindings whose key sequence matches
+    // a previous value we installed but not the current one. The
+    // 2026-05 swap moved `jj-hp-push` to `x P` and `jj-hp-push-
+    // selected` to `x p`; older configs need updating.
+    //
+    // Detection key: action name is ours AND `seq` is in our
+    // installed-history. Custom keys the user picked are left alone
+    // because they're not in our history list.
+    migrate_seq_for_managed_binding(
+        bindings_arr,
+        &actions_snapshot,
+        NEW_PUSH_NAME,
+        &push_seq_history(),
+        NEW_PUSH_DESC,
+        &push_lua_forms(),
+        push_desc_managed_set(),
+    );
+    migrate_seq_for_managed_binding(
+        bindings_arr,
+        &actions_snapshot,
+        NEW_PUSH_SELECTED_NAME,
+        &push_selected_seq_history(),
+        NEW_PUSH_SELECTED_DESC,
+        &push_selected_lua_forms(),
+        push_selected_desc_managed_set(),
+    );
+
+    // Migrate `desc` independently of seq — when an action's lua
+    // was updated (e.g. push got `--all` in 2026-06), the binding's
+    // desc string also changed but the seq didn't. The seq-
+    // migration above won't fire for those configs, so refresh
+    // desc here whenever it matches a historical form we shipped.
+    //
+    // We pass `actions_arr` + the lua-history list so the helper
+    // can gate the desc rewrite on "the action's current lua is
+    // still one of ours." Without this guard, a user who
+    // customized the lua but left the old shipped desc string in
+    // place would have their desc silently rewritten to the new
+    // wording — quietly mis-labelling their custom action.
+    migrate_binding_desc(
+        bindings_arr,
+        &actions_snapshot,
+        NEW_PUSH_NAME,
+        NEW_PUSH_DESC,
+        &push_desc_history(),
+        &push_lua_forms(),
+    );
+    migrate_binding_desc(
+        bindings_arr,
+        &actions_snapshot,
+        NEW_PUSH_SELECTED_NAME,
+        NEW_PUSH_SELECTED_DESC,
+        &push_selected_desc_history(),
+        &push_selected_lua_forms(),
+    );
+
+    // Add any missing bindings (idempotent). Selected-bookmark
+    // binding comes first to match the action ordering — keeps
+    // jjui's `x`-prefix overlay listing daily-use keys at the top
+    // and whole-stack/recovery flows below.
     if !bindings_has_action(bindings_arr, NEW_PUSH_SELECTED_NAME) {
         bindings_arr.push(make_binding(
             NEW_PUSH_SELECTED_NAME,
-            &["x", "P"],
+            &push_selected_seq_history()[0],
             "revisions",
             NEW_PUSH_SELECTED_DESC,
         ));
         added.added_binding_x_p_caps = true;
+    }
+    if !bindings_has_action(bindings_arr, NEW_PUSH_NAME) {
+        bindings_arr.push(make_binding(
+            NEW_PUSH_NAME,
+            &push_seq_history()[0],
+            "revisions",
+            NEW_PUSH_DESC,
+        ));
+        added.added_binding_x_p = true;
     }
 
     let serialized = toml::to_string_pretty(&doc)
@@ -328,15 +408,108 @@ const NEW_PUSH_NAME: &str = "jj-hp-push";
 const NEW_PUSH_SELECTED_NAME: &str = "jj-hp-push-selected";
 const OLD_PUSH_NAME: &str = "jj-push";
 const OLD_PUSH_SELECTED_NAME: &str = "jj-push-selected";
-const NEW_PUSH_DESC: &str = "jj-hp push";
-const NEW_PUSH_SELECTED_DESC: &str = "jj-hp push selected bookmark(s)";
+const NEW_PUSH_DESC: &str = "jj-hp push every bookmark";
+const NEW_PUSH_SELECTED_DESC: &str = "jj-hp push selected bookmark";
+
+/// Every key sequence we have ever installed for `jj-hp-push`,
+/// most-recent first. The current value is index 0.
+///
+/// The 2026-05 swap moved the "push everything" action from
+/// `x p` (lowercase) to `x P` (uppercase) so that the more
+/// commonly-used `jj-hp-push-selected` could take the easier
+/// keypress. `apply_jjui_config`'s migration pass detects the
+/// previous sequence and updates it in place when the binding's
+/// name is ours and its lua body is still managed.
+fn push_seq_history() -> Vec<Vec<&'static str>> {
+    vec![
+        vec!["x", "P"], // current — push entire @-ancestor stack
+        vec!["x", "p"], // pre-2026-05 swap
+    ]
+}
+
+/// Every key sequence we have ever installed for
+/// `jj-hp-push-selected`, most-recent first.
+fn push_selected_seq_history() -> Vec<Vec<&'static str>> {
+    vec![
+        vec!["x", "p"], // current — push just the focused bookmark
+        vec!["x", "P"], // pre-2026-05 swap
+    ]
+}
+
+/// Every binding `desc` we have ever installed for `jj-hp-push`,
+/// most-recent first. Used by `migrate_binding_desc` to refresh
+/// the displayed text after we change the action's semantics.
+fn push_desc_history() -> Vec<&'static str> {
+    vec![
+        // Current: "every bookmark" reflects the new `--all` lua.
+        NEW_PUSH_DESC,
+        // Pre-2026-06: bareword `jj-hp push` desc.
+        "jj-hp push",
+    ]
+}
+
+/// Every binding `desc` we have ever installed for the OLD push
+/// action name (`jj-push`) before the 2026-06 rename, plus every
+/// desc we have ever installed for the new name. Used by the
+/// rename-time desc migration to recognise an unmodified
+/// managed desc (which we may safely overwrite) vs a
+/// user-customized desc (which we must preserve).
+///
+/// Order doesn't matter — this is membership-tested, not
+/// preference-ordered like `push_desc_history`.
+fn push_desc_managed_set() -> &'static [&'static str] {
+    &[
+        // Pre-2026-06 default desc on the old `jj-push` binding.
+        "jj push",
+        // Every desc we've ever installed for the new name. The
+        // current `jj-hp-push` action shouldn't show up on a
+        // still-OLD-name binding in practice, but including it
+        // keeps the rename idempotent if a user manually edited
+        // the action name without touching the desc.
+        NEW_PUSH_DESC,
+        "jj-hp push",
+    ]
+}
+
+/// Every binding `desc` we have ever installed for
+/// `jj-hp-push-selected`, most-recent first.
+fn push_selected_desc_history() -> Vec<&'static str> {
+    vec![
+        // Current: dropped the "(s)" since the binding really
+        // operates on the single focused bookmark.
+        NEW_PUSH_SELECTED_DESC,
+        // Pre-2026-06 form.
+        "jj-hp push selected bookmark(s)",
+    ]
+}
+
+/// Counterpart to `push_desc_managed_set` for the
+/// `jj-hp-push-selected` action — desc strings we may safely
+/// overwrite during the OLD→NEW name rename.
+fn push_selected_desc_managed_set() -> &'static [&'static str] {
+    &[
+        // Pre-2026-06 default on the old `jj-push-selected`
+        // binding.
+        "jj push selected bookmark(s)",
+        // Current and intermediate forms.
+        NEW_PUSH_SELECTED_DESC,
+        "jj-hp push selected bookmark(s)",
+    ]
+}
 
 /// Known lua bodies we have auto-installed for `jj-hp-push` historically.
 /// Index 0 is the current form; later indices are older forms we still
 /// recognize as ours (so we can safely rename them).
 fn push_lua_forms() -> Vec<&'static str> {
     vec![
-        // Current form.
+        // Current form: `--all` so `x P` pushes every local
+        // bookmark across the repo, not just the @-ancestor
+        // chain. Mirrors jj-gt's parallel 2026-06 broadening —
+        // jjui's cursor moves freely without `@`, so an
+        // @-anchored "push everything" key never matched intent.
+        "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\", \"--all\")\n  revisions.refresh()\n",
+        // Pre-2026-06 form: bareword `jj-hp push` (only the
+        // @-default bookmarks).
         "  jj_async(\"util\", \"exec\", \"--\", \"jj-hp\", \"push\")\n  revisions.refresh()\n",
         // Pre-jj-hp form (called `jj push` via the alias).
         "  jj_async(\"push\")\n  revisions.refresh()\n",
@@ -357,8 +530,12 @@ fn push_selected_lua_forms() -> Vec<&'static str> {
 enum ActionState {
     /// Neither name present anywhere — we need to add the new action.
     Missing,
-    /// New name already present — leave alone.
+    /// New name already present with current lua — leave alone.
     AlreadyNewName,
+    /// New name already present but lua matches a historical form
+    /// (other than index 0). Refresh the lua to the current form
+    /// without renaming.
+    AlreadyNewNameStaleLua,
     /// Old name present, lua matches one of our known forms — safe to rename.
     OldManaged,
     /// Old name present, lua is custom (user-owned) — leave alone.
@@ -371,20 +548,56 @@ fn classify_action(
     old_name: &str,
     known_lua: &[&str],
 ) -> ActionState {
+    // Track presence of the new-name action independently of its
+    // lua. A managed action SHOULD always have a `lua` field
+    // (we put it there), but config can be hand-edited and the
+    // `lua` key could be missing. Without this split, the pre-
+    // refactor `bool` presence check would have returned
+    // `AlreadyNewName` for a lua-less entry and `apply_action`
+    // would have left it alone; the lua-Option-only version
+    // fell through to the `found_old` arm and could synthesize a
+    // duplicate. Restore the presence-first semantics.
+    //
+    // First-match semantics for both `found_new_lua` and
+    // `found_old` so we agree with `apply_action`, which uses
+    // `break` after the first match it sees. If a hand-edited
+    // config has duplicate entries for the same action name, the
+    // last-match-wins behavior we had previously would classify
+    // against the LATER entry's lua, then `apply_action` would
+    // overwrite the EARLIER entry's lua — potentially clobbering
+    // user-owned bytes the user kept in the first slot.
     let mut found_new = false;
+    let mut found_new_lua: Option<&str> = None;
     let mut found_old: Option<&str> = None;
     for a in actions {
         let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        if name == new_name {
+        if name == new_name && !found_new {
             found_new = true;
+            found_new_lua = a.get("lua").and_then(|v| v.as_str());
         }
-        if name == old_name {
+        if name == old_name && found_old.is_none() {
             found_old = a.get("lua").and_then(|v| v.as_str());
         }
     }
     if found_new {
+        let Some(lua) = found_new_lua else {
+            // New name present but no `lua` field — leave alone
+            // rather than duplicate. The action is structurally
+            // odd but it's still the user's choice.
+            return ActionState::AlreadyNewName;
+        };
+        // New name present. Refresh the lua if it matches an
+        // older form we've installed historically. Custom user
+        // lua (anything outside the history list) is left alone.
+        let current = known_lua.first().copied().unwrap_or("");
+        if lua == current {
+            return ActionState::AlreadyNewName;
+        }
+        if known_lua.contains(&lua) {
+            return ActionState::AlreadyNewNameStaleLua;
+        }
         return ActionState::AlreadyNewName;
     }
     match found_old {
@@ -417,6 +630,21 @@ fn apply_action(
         ActionState::AlreadyNewName => {
             // Idempotent: leave alone.
         }
+        ActionState::AlreadyNewNameStaleLua => {
+            // Same name we installed; lua matches an older form
+            // we shipped (in `known_lua` past index 0). Refresh
+            // in place — keeps user keybindings intact while
+            // picking up the new lua body.
+            for a in actions.iter_mut() {
+                let Some(table) = a.as_table_mut() else {
+                    continue;
+                };
+                if table.get("name").and_then(|v| v.as_str()) == Some(new_name) {
+                    table.insert("lua".into(), toml::Value::String(new_lua));
+                    break;
+                }
+            }
+        }
         ActionState::OldManaged => {
             // Rename in place. Find the old entry and rename it; also
             // refresh the lua to the current form.
@@ -446,6 +674,160 @@ fn apply_action(
 fn bindings_has_action(arr: &[toml::Value], action: &str) -> bool {
     arr.iter()
         .any(|v| v.get("action").and_then(|n| n.as_str()) == Some(action))
+}
+
+/// In-place migration: when a binding's `action` matches `name` and
+/// its `seq` is a sequence we previously installed for that action
+/// (anything in `seq_history` past index 0), rewrite the `seq` to
+/// the current value (index 0) and refresh `desc`.
+///
+/// User-customized sequences are NOT migrated — they're not in
+/// `seq_history`, so the detection falls through. Idempotent: a
+/// binding whose seq is already the current value is left alone.
+///
+/// The `actions` / `lua_history` pair gates the rewrite on
+/// "the action this binding points at is still running one of our
+/// managed lua forms." Without that guard, a user who hand-wrote
+/// a `jj-hp-push` action with custom lua but kept a historical
+/// `seq` (e.g. they liked our `x p`/`x P` swap but the lua flag
+/// changes broke their workflow, so they reverted lua only) would
+/// have their seq AND desc clobbered back to our managed shape.
+/// Mirrors the same managed-action check
+/// `migrate_binding_desc` uses — both helpers refuse to touch a
+/// binding whose action carries non-managed lua.
+fn migrate_seq_for_managed_binding(
+    bindings: &mut [toml::Value],
+    actions: &[toml::Value],
+    name: &str,
+    seq_history: &[Vec<&'static str>],
+    desc: &str,
+    lua_history: &[&str],
+    managed_desc_set: &[&str],
+) {
+    if seq_history.len() < 2 {
+        return; // No prior versions to migrate from.
+    }
+    // Look up the action's current lua body once. If it isn't in
+    // our installed-history list (current form or any prior),
+    // treat the action as user-owned and don't touch ANY of its
+    // bindings' seqs — even ones whose seq happens to match a
+    // historical form. Same rationale as `migrate_binding_desc`.
+    let action_lua = actions
+        .iter()
+        .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|a| a.get("lua").and_then(|v| v.as_str()));
+    let action_is_managed = match action_lua {
+        Some(lua) => lua_history.contains(&lua),
+        // No action with this name → no binding can refer to it;
+        // bail.
+        None => return,
+    };
+    if !action_is_managed {
+        return;
+    }
+    let current = &seq_history[0];
+    let prior: std::collections::HashSet<&[&str]> =
+        seq_history[1..].iter().map(|s| s.as_slice()).collect();
+    for b in bindings.iter_mut() {
+        let Some(action) = b.get("action").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if action != name {
+            continue;
+        }
+        let Some(existing_seq) = b.get("seq").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let as_strs: Vec<&str> = existing_seq.iter().filter_map(|v| v.as_str()).collect();
+        if !prior.contains(as_strs.as_slice()) {
+            // Either the seq is already current, or the user
+            // picked a custom key. Either way, no migration.
+            continue;
+        }
+        // Refresh `desc` only when it matches one we've installed
+        // ourselves. A user-customized label (action managed but
+        // display text edited) survives the seq migration.
+        let existing_desc = b
+            .as_table()
+            .and_then(|t| t.get("desc"))
+            .and_then(|v| v.as_str());
+        let desc_is_managed = existing_desc.is_none_or(|d| managed_desc_set.contains(&d));
+        let table = b.as_table_mut().unwrap();
+        table.insert(
+            "seq".into(),
+            toml::Value::Array(
+                current
+                    .iter()
+                    .map(|s| toml::Value::String((*s).into()))
+                    .collect(),
+            ),
+        );
+        if desc_is_managed {
+            table.insert("desc".into(), toml::Value::String(desc.into()));
+        }
+    }
+}
+
+/// Rewrite the `desc` field of a binding when its desc matches a
+/// historical form we shipped AND the action it points at still
+/// runs one of our managed lua forms. The two checks together
+/// keep us from touching user-owned bindings — neither a custom
+/// desc on a managed action nor a managed desc on a user-owned
+/// action will be rewritten. Same custom-desc preservation
+/// rationale as [`migrate_seq_for_managed_binding`].
+///
+/// Idempotent: when the desc is already at index 0 of the history
+/// (current form), no write happens.
+fn migrate_binding_desc(
+    bindings: &mut [toml::Value],
+    actions: &[toml::Value],
+    action_name: &str,
+    current_desc: &str,
+    desc_history: &[&str],
+    lua_history: &[&str],
+) {
+    if desc_history.is_empty() {
+        return;
+    }
+    // Look up the action's current lua body once. If it isn't in
+    // our installed-history list (current form or any prior),
+    // treat the action as user-owned and don't touch ANY of its
+    // bindings' descs — even ones whose desc string happens to
+    // match a historical form. The user owns the action; we don't
+    // assume their desc is ours just because the strings line up.
+    let action_lua = actions
+        .iter()
+        .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(action_name))
+        .and_then(|a| a.get("lua").and_then(|v| v.as_str()));
+    let action_is_managed = match action_lua {
+        Some(lua) => lua_history.contains(&lua),
+        // No action with this name at all → no binding can refer
+        // to it; bail without touching anything.
+        None => return,
+    };
+    if !action_is_managed {
+        return;
+    }
+    let prior: std::collections::HashSet<&str> = desc_history.iter().copied().collect();
+    for b in bindings.iter_mut() {
+        let Some(action) = b.get("action").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if action != action_name {
+            continue;
+        }
+        let Some(existing_desc) = b.get("desc").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if existing_desc == current_desc {
+            continue; // already current
+        }
+        if !prior.contains(existing_desc) {
+            continue; // user-customized — leave alone
+        }
+        let table = b.as_table_mut().unwrap();
+        table.insert("desc".into(), toml::Value::String(current_desc.into()));
+    }
 }
 
 fn make_binding(action: &str, seq: &[&str], scope: &str, desc: &str) -> toml::Value {

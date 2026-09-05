@@ -11,7 +11,6 @@ fn empty() -> PushArgs {
         all: false,
         tracked: false,
         deleted: false,
-        allow_new: false,
         passthrough: vec![],
     }
 }
@@ -74,14 +73,12 @@ fn boolean_flags() {
         all: true,
         tracked: true,
         deleted: true,
-        allow_new: true,
         ..empty()
     };
     let argv = push_argv(&args, false);
     assert!(argv.contains(&"--all".to_string()));
     assert!(argv.contains(&"--tracked".to_string()));
     assert!(argv.contains(&"--deleted".to_string()));
-    assert!(argv.contains(&"--allow-new".to_string()));
 }
 
 #[test]

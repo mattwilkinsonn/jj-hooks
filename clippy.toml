@@ -1,0 +1,3 @@
+# Single-crate clippy config. Per-tool overrides go in
+# Cargo.toml under `[lints]`.
+msrv = "1.89"
