@@ -15,8 +15,9 @@ carried.
 
 ## Problem / Intent
 
-The jj-hp pre-push gate runs `moon ci` (via hk) inside an ephemeral detached
-worktree under `/tmp/jj-hooks-worktree-*`. When a consumer repo's gate fans out
+The jj-hp pre-push gate runs the consumer repo's configured hk gate command (in
+orion, `moon ci`) inside an ephemeral detached worktree under
+`/tmp/jj-hooks-worktree-*`. When a consumer repo's gate fans out
 multiple parallel `devenv` evaluations (orion's `ci:build-image-*-amd64` legs),
 the legs intermittently fail with "Failed to evaluate devenv configuration" at
 `<worktree>/.devenv/bootstrap/default.nix` — worktree-only, parallel-only,
@@ -211,9 +212,9 @@ cited as established.
       );
   ```
 
-  And the newer twin `gate_cache.rs` (from monorepo #294/T1): opt-out read once at the
-  entrypoints (`gate_cache_enabled`, `gate_cache.rs:95-99`), decision cached
-  process-globally keyed by canonicalized `workspace_root`
+  And the newer twin `gate_cache.rs` (from monorepo #294/T1): opt-out read
+  once at the entrypoints (`gate_cache_enabled`, `gate_cache.rs:95-99`),
+  decision cached process-globally keyed by canonicalized `workspace_root`
   (`gate_cache.rs:33-47`), applied by a low-level helper with no `JjCli` in
   scope (`apply_gate_cache`, `gate_cache.rs:61-84`), plus a `#[cfg(test)]
   test_seed` (`gate_cache.rs:130-139`). The pre-warm reuses this exact shape.
@@ -402,8 +403,8 @@ as a non-load-bearing deferral.
 
 - **Once per worktree**: `run_once` creates exactly one worktree per pass
   (`hooks.rs:784` is the sole `Worktree::create` callsite in `src/` — the
-  other two are in `tests/workspace.rs`); every retry pass builds a fresh worktree and gets a fresh
-  pre-warm.
+  other two are in `tests/workspace.rs`); every retry pass builds a fresh
+  worktree and gets a fresh pre-warm.
 - **Before ANY subprocess in the worktree**: setup steps (`:805`) run user
   commands that may themselves invoke devenv; the hk Pkl warm (`:899-908`)
   and the runner fan-out (`:940-983`) all come later. Landing before
