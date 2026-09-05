@@ -3,8 +3,9 @@ name: release
 # Triggered by pushing a version tag (`jj git push --tag v0.3.12`).
 #
 # Builds release artifacts for jj-hooks, attaches them to a GitHub
-# Release, bumps Formula/jj-hooks.rb in-place, and publishes the Rust
-# crate to crates.io.
+# Release, bumps Formula/jj-hooks.rb in the consolidated
+# mattwilkinsonn/homebrew-tap, and publishes the Rust crate to
+# crates.io.
 
 "on":
   push:
@@ -196,11 +197,30 @@ jobs:
           if [ "$PRERELEASE" = "true" ]; then
               args+=(--prerelease)
           fi
-          gh release create "$TAG" "${args[@]}" \
-              release/jj-hooks-v*.tar.gz \
-              release/jj-hooks-v*.sha256
+          # `gh release create` hard-fails when the release already exists,
+          # which cascades skips into bump-tap + publish-crates on any
+          # workflow_dispatch re-run. Create only when absent; the upload
+          # step below refreshes the assets either way.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "release $TAG already exists; skipping create"
+          else
+              gh release create "$TAG" "${args[@]}"
+          fi
 
-  # ----- Bump Formula/jj-hooks.rb with the new version + sha256s.
+      # Always runs, so a first release and a re-run over an existing
+      # release both end with the current assets attached.
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+              release/jj-hooks-v*.tar.gz \
+              release/jj-hooks-v*.sha256 \
+              --clobber --repo "$GITHUB_REPOSITORY"
+
+  # ----- Bump Formula/jj-hooks.rb in mattwilkinsonn/homebrew-tap.
   bump-tap:
     name: Bump Homebrew tap formula
     needs: [meta, build-rust, publish-release]
@@ -212,37 +232,59 @@ jobs:
       contents: write
     steps:
       # Mint a short-lived (~1 hour) installation token for the
-      # zireael-release GitHub App. The App is in the bypass actors
+      # zireael-release GitHub App. The bump commit lands on
+      # mattwilkinsonn/homebrew-tap's main, which the default
+      # GITHUB_TOKEN cannot reach at all (it is scoped to this repo) and
+      # which is branch-protected anyway. The App is in the bypass actors
       # list for the main-branch ruleset, so its pushes skip the
-      # PR-required + status-checks-required gates. Default
-      # GITHUB_TOKEN can't push to main (correctly — it's the same
-      # cred every workflow gets, and you don't want every workflow
-      # bypassing branch protection).
+      # PR-required + status-checks-required gates.
       #
       # App configuration:
       #   - App ID:        ${{ vars.RELEASE_BOT_APP_ID }}     (repo variable)
       #   - Private key:   ${{ secrets.RELEASE_BOT_PRIVATE_KEY }} (repo secret)
       #   - Permissions:   contents:write + metadata:read (least-privilege)
-      #   - Installed on:  this repo only
-      #   - Bypass actor:  main branch ruleset
+      #   - Installed on:  this repo + mattwilkinsonn/homebrew-tap
+      #   - Bypass actor:  main-branch ruleset in each installed repo
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
           app-id: ${{ vars.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # `repositories` REPLACES the current-repo default rather than
+          # extending it, so jj-hooks has to be listed alongside the tap
+          # or the self checkout below fails to authenticate.
+          owner: mattwilkinsonn
+          repositories: |
+            jj-hooks
+            homebrew-tap
 
       - uses: actions/checkout@v6
         with:
-          # The workflow is triggered by a tag, but the tap bump must be
-          # committed on top of current main. Checking out the tag and
-          # pushing HEAD:main races any main update after the tag was cut
-          # and gets rejected as non-fast-forward.
+          # The self checkout carries .github/scripts/bump-formulae.py,
+          # which rewrites the formula inside the tap checkout below.
+          # ref: main (not the release tag) so the bump always runs the
+          # current script.
           ref: main
           fetch-depth: 0
-          # Checkout with the App token so the local git remote carries it
-          # for the `git push` later. actions/checkout also writes this
-          # token into .git/config's extraheader, so plain `git push` Just
-          # Works without re-auth.
+          # Checkout with the App token so the local git remotes carry a
+          # cred the bot can push with. actions/checkout also writes this
+          # token into .git/config's extraheader, so the plain `git push`
+          # in the tap checkout Just Works without re-auth.
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/checkout@v6
+        with:
+          # The formula now lives in the consolidated tap, not in this
+          # repo, so the bump is a cross-repo commit.
+          repository: mattwilkinsonn/homebrew-tap
+          path: tap
+          # The tag that triggered this workflow is irrelevant to the tap;
+          # the bump must land on top of the tap's current main or the
+          # push is rejected as non-fast-forward.
+          ref: main
+          # Required: the fetch + rebase guard in `Commit + push` cannot
+          # rebase across the default depth-1 shallow boundary.
+          fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -270,6 +312,24 @@ jobs:
               done
           done
 
+      # Fail closed before rewriting anything. bump-formulae.py skips a
+      # missing formula and returns 0, and `Commit + push`'s own
+      # `git diff --quiet Formula/` then exits 0 "nothing to bump" — so
+      # without this guard an un-revived (or still-disabled) tap formula
+      # yields a GREEN bump-tap that ships nothing. Runs from the
+      # workspace root, hence the `tap/` prefix.
+      - name: Verify the tap formula is live
+        run: |
+          set -euo pipefail
+          if [ ! -f tap/Formula/jj-hooks.rb ]; then
+              echo "error: tap/Formula/jj-hooks.rb is missing — refusing to ship a no-op bump" >&2
+              exit 1
+          fi
+          if grep -q 'disable!' tap/Formula/jj-hooks.rb; then
+              echo "error: tap/Formula/jj-hooks.rb is still disabled — refusing to bump it" >&2
+              exit 1
+          fi
+
       - name: Rewrite the formula in-place
         env:
           VER: ${{ needs.meta.outputs.version }}
@@ -278,10 +338,16 @@ jobs:
           JJ_HOOKS_DARWIN_ARM64: ${{ steps.shas.outputs.jj-hooks-darwin-arm64 }}
           JJ_HOOKS_LINUX_X64: ${{ steps.shas.outputs.jj-hooks-linux-x64 }}
           JJ_HOOKS_LINUX_ARM64: ${{ steps.shas.outputs.jj-hooks-linux-arm64 }}
-        run: python3 .github/scripts/bump-formulae.py
+        # bump-formulae.py resolves Path("Formula") relative to its CWD, so
+        # it runs in the tap checkout while the script itself is read from
+        # the self checkout at the workspace root.
+        working-directory: tap
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/bump-formulae.py"
       - name: Commit + push
         env:
           TAG: ${{ needs.meta.outputs.tag }}
+        # Run in the tap checkout so `origin` is the tap remote.
+        working-directory: tap
         run: |
           set -euo pipefail
           if git diff --quiet Formula/; then
@@ -324,12 +390,12 @@ jobs:
       - name: Tap, install, and test the formula
         run: |
           set -euo pipefail
-          brew tap mattwilkinsonn/jj-hooks https://github.com/mattwilkinsonn/jj-hooks
-          brew trust mattwilkinsonn/jj-hooks
+          brew tap mattwilkinsonn/tap
+          brew trust mattwilkinsonn/tap
           for formula in jj-hooks; do
             echo "::group::${formula}"
-            brew install "mattwilkinsonn/jj-hooks/${formula}"
-            brew test "mattwilkinsonn/jj-hooks/${formula}"
+            brew install "mattwilkinsonn/tap/${formula}"
+            brew test "mattwilkinsonn/tap/${formula}"
             echo "::endgroup::"
           done
 
