@@ -3,11 +3,11 @@
     "dev-shared": {
       "flake": false,
       "locked": {
-        "lastModified": 1788400903,
-        "narHash": "sha256-5q2Q5WZlUhUCwAwYtSZbOqWuuJeUj7V764Xhn53GYRE=",
+        "lastModified": 1789221106,
+        "narHash": "sha256-N4pag51z9mctpen151vecufCZllDiA6wV1WfIhxlBXU=",
         "owner": "mattwilkinsonn",
         "repo": "dev-shared",
-        "rev": "95c0c51de34c5790ca18f8cea66f5d0b7041dd75",
+        "rev": "5aa9b53d8f4eb2619bf35c59445f66f6754ebbd3",
         "type": "github"
       },
       "original": {

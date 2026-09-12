@@ -1,11 +1,47 @@
-{ pkgs, inputs, ... }:
+{
+  pkgs,
+  lib,
+  inputs,
+  ...
+}:
 # jj-hooks dev shell. The shared toolchain (rust-overlay pin, linters, cargo-nextest, jj,
 # and the ci:markdownlint/actionlint/nixfmt/deadnix lint task set) comes from the dev-shared
 # module imported in devenv.yaml. This file adds only what is jj-hooks-specific: the hook
 # framework backends its integration tests drive, the pkl package-cache warm, the crate's
 # own ci:* tasks, and the hk pre-push gate install.
+let
+  # dev-shared puts jj-hooks on PATH from a released tag, which is wrong in this repo: the
+  # shell would serve the last release while you edit the next one. Rebuild from the working
+  # tree instead. `src = ./.` with `cargoLock.lockFile` needs no hash and no IFD, and it
+  # breaks the dev-shared -> jj-hooks version cycle a flake input would create.
+  #
+  # hiPrio wins the PATH collision with the pinned build: devenv orders `packages` by
+  # meta.priority, so the raw pin can otherwise shadow this one regardless of list order.
+  jj-hooks-local = lib.hiPrio (
+    pkgs.rustPlatform.buildRustPackage {
+      pname = "jj-hooks";
+      version = (lib.importTOML ./Cargo.toml).package.version;
+      # An allowlist, not `./.`: a bare path literal ignores .gitignore, so it would
+      # drag target/ (2+ GB) and .jj/ into the store and rebuild whenever either churns.
+      src = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./Cargo.toml
+          ./Cargo.lock
+          ./src
+        ];
+      };
+      cargoLock.lockFile = ./Cargo.lock;
+      # `cargo nextest` in ci:test gates the suite against real jj repos and hook backends;
+      # this build only needs the two binaries.
+      doCheck = false;
+    }
+  );
+in
 {
   packages = with pkgs; [
+    jj-hooks-local
+
     # jj-hooks' integration tests drive real hook frameworks, so the backends must be on
     # PATH: pre-commit, prek, lefthook, and hk (from its flake input); pkl (hk reads hk.pkl).
     pre-commit
