@@ -20,8 +20,17 @@ let
   jj-hooks-local = lib.hiPrio (
     pkgs.rustPlatform.buildRustPackage {
       pname = "jj-hooks";
-      version = "0.3.12";
-      src = ./.;
+      version = (lib.importTOML ./Cargo.toml).package.version;
+      # An allowlist, not `./.`: a bare path literal ignores .gitignore, so it would
+      # drag target/ (2+ GB) and .jj/ into the store and rebuild whenever either churns.
+      src = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./Cargo.toml
+          ./Cargo.lock
+          ./src
+        ];
+      };
       cargoLock.lockFile = ./Cargo.lock;
       # `cargo nextest` in ci:test gates the suite against real jj repos and hook backends;
       # this build only needs the two binaries.
