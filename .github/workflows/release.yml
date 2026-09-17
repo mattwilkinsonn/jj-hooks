@@ -367,9 +367,33 @@ jobs:
           # Main can advance while the release builds artifacts. Rebase the
           # formula bump over the latest main immediately before pushing so
           # the bot push stays a fast-forward instead of leaving the tap stale.
-          git fetch origin main:refs/remotes/origin/main
-          git rebase origin/main
-          git push origin HEAD:main
+          max_attempts=3
+          for attempt in 1 2 3; do
+              echo "push attempt ${attempt}/${max_attempts}"
+              git fetch origin main:refs/remotes/origin/main
+              git rebase origin/main
+              if push_output=$(git push origin HEAD:main 2>&1); then
+                  printf '%s\n' "$push_output"
+                  exit 0
+              else
+                  push_status=$?
+                  printf '%s\n' "$push_output" >&2
+                  case "$push_output" in
+                      *non-fast-forward*)
+                          if [ "$attempt" -eq "$max_attempts" ]; then
+                              echo "error: tap push still rejected after ${max_attempts} attempts" >&2
+                              exit "$push_status"
+                          fi
+                          echo "tap main advanced; retrying after fetch and rebase" >&2
+                          ;;
+                      *)
+                          exit "$push_status"
+                          ;;
+                  esac
+              fi
+          done
+          echo "error: tap push loop ended without a successful push" >&2
+          exit 1
 
   # ----- Validate the freshly published tap installs end-to-end.
   validate-tap:
@@ -379,7 +403,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
