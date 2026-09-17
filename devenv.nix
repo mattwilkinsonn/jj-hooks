@@ -59,6 +59,8 @@ in
     "ci:fmt".exec = "cargo fmt --check";
     "ci:clippy".exec = "cargo clippy --all-targets -- -D warnings";
     "ci:test".exec = "cargo nextest run --no-fail-fast";
+    "ci:script".exec =
+      "python3 .github/scripts/test_bump-formulae.py && python3 .github/scripts/test_push-tap.py";
   };
 
   enterShell = ''
