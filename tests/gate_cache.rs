@@ -1,7 +1,7 @@
 //! Integration tests for the gate-cache mechanism (Mode A / T1): the gate
 //! subprocess's `CARGO_TARGET_DIR` is pointed at the PRIMARY workspace's
 //! `target/` so the gate reuses the user's warm dev builds instead of paying a
-//! cold build in the ephemeral `/tmp` worktree.
+//! cold build in the ephemeral hook worktree.
 //!
 //! These drive the real CLI push pipeline (`jj-hp push`) and the batch API,
 //! asserting what `CARGO_TARGET_DIR` the hook child actually observed via the

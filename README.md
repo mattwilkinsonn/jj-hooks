@@ -39,24 +39,26 @@ primary and secondary workspaces.
 
 ## Hook worktrees
 
-Hook worktrees live on disk, not in `/tmp`: a full checkout can be gigabytes,
-and on hosts where `/tmp` is a RAM-backed tmpfs, leaked ones exhaust memory.
-The root is the first of:
+Hook worktrees live in an on-disk cache by default, not in `/tmp`: a full
+checkout can be gigabytes, and on hosts where `/tmp` is a RAM-backed tmpfs,
+leaked ones exhaust memory. The root is the first of:
 
 1. `JJ_HOOKS_WORKTREE_ROOT` (absolute path)
 2. jj config `jj-hooks.worktree-root` (absolute path)
-3. `$XDG_CACHE_HOME/jj-hooks/worktrees`
+3. `$XDG_CACHE_HOME/jj-hooks/worktrees`, when `XDG_CACHE_HOME` is absolute
 4. `~/.cache/jj-hooks/worktrees`
-5. `<temp dir>/jj-hooks-worktrees`, with a warning
+5. `<temp dir>/jj-hooks-worktrees`, with a warning; this may be tmpfs
 
 A relative override is ignored with a warning.
 
 Each worktree has a sibling `<name>.lock` file that its `jj-hp` process holds
 locked for the worktree's lifetime. If a run dies without cleaning up
 (Ctrl-C, SIGKILL, a crash, power loss), the first worktree creation of the next
-`jj-hp` process in that root removes every worktree whose lock is free. It
-removes nothing it cannot prove is its own. A worktree interrupted by a signal
-therefore stays on disk until the next run, not until reboot.
+`jj-hp` process in that root reaps every worktree whose lock is free and whose
+owner record proves it is a jj-hp worktree. An entry with an empty or missing
+owner record is kept for an hour after creation, and one with a malformed
+record is left alone. A worktree interrupted by a signal therefore stays on
+disk until the next run, not until reboot.
 
 Worktrees left in `/tmp` by versions before 0.4.0 have no lock file, so the
 sweep leaves them alone. Delete those directories, then run `git worktree prune`

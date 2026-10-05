@@ -16,8 +16,8 @@ carried.
 ## Problem / Intent
 
 The jj-hp pre-push gate runs the consumer repo's configured hk gate command (in
-orion, `moon ci`) inside an ephemeral detached worktree under
-`/tmp/jj-hooks-worktree-*`. When a consumer repo's gate fans out
+orion, `moon ci`) inside an ephemeral detached worktree (then under
+`/tmp/jj-hooks-worktree-*`). When a consumer repo's gate fans out
 multiple parallel `devenv` evaluations (orion's `ci:build-image-*-amd64` legs),
 the legs intermittently fail with "Failed to evaluate devenv configuration" at
 `<worktree>/.devenv/bootstrap/default.nix` — worktree-only, parallel-only,

@@ -19,8 +19,9 @@ Hook worktrees no longer leak onto tmpfs.
 ### Fixed
 
 - A `jj-hp` run killed mid-hook (Ctrl-C, SIGKILL, crash) no longer leaks its
-  worktree. Each worktree carries a locked `<name>.lock` owner file, and the next
-  run reaps every worktree whose lock is free.
+  worktree for good. Each worktree carries a locked `<name>.lock` owner file,
+  and the next run reaps every worktree whose lock is free and whose owner
+  record checks out. Entries without an owner record get a one-hour grace.
 - Removal uses `git worktree remove --force --force`, and a failed `git worktree
   add` cleans up its partial checkout.
 
