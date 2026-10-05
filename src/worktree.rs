@@ -343,9 +343,14 @@ fn registered_worktree(git_dir: &Path, checkout: &Path) -> std::io::Result<bool>
     }
     let checkout = canonicalize_missing_path(checkout)?;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(path) = line.strip_prefix("worktree ")
-            && canonicalize_missing_path(Path::new(path))? == checkout
-        {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let listed = match canonicalize_missing_path(Path::new(path)) {
+            Ok(listed) => listed,
+            Err(_) => continue,
+        };
+        if listed == checkout {
             return Ok(true);
         }
     }
@@ -481,8 +486,7 @@ impl Worktree {
             owner,
             removed: false,
         };
-        let mut git_add_succeeded = false;
-
+        let mut git_add_failed = false;
         let result = (|| {
             write_owner(&mut worktree.owner, git_dir)?;
             worktree.owner.sync_all()?;
@@ -503,6 +507,7 @@ impl Worktree {
             drop(_guard);
 
             if !output.status.success() {
+                git_add_failed = true;
                 return Err(JjHooksError::JjFailed {
                     status: output.status.code().unwrap_or(-1),
                     stderr: format!(
@@ -511,13 +516,31 @@ impl Worktree {
                     ),
                 });
             }
-            git_add_succeeded = true;
             Ok(())
         })();
 
         if let Err(error) = result {
-            if !git_add_succeeded {
-                worktree.remove_locally()?;
+            let registered = if git_add_failed {
+                match registered_worktree(git_dir, worktree.checkout.path()) {
+                    Ok(registered) => registered,
+                    Err(check_error) => {
+                        warn!(
+                            "failed to verify worktree registration after git add failed: {check_error}"
+                        );
+                        true
+                    }
+                }
+            } else {
+                false
+            };
+            if registered {
+                if let Err(cleanup_error) = worktree.remove() {
+                    warn!("failed to clean up worktree after creation failed: {cleanup_error}");
+                }
+            } else if let Err(cleanup_error) = worktree.remove_locally() {
+                warn!(
+                    "failed to clean up unregistered worktree after creation failed: {cleanup_error}"
+                );
             }
             return Err(error);
         }
@@ -670,6 +693,77 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("worktree "))
             .count()
+    }
+
+    #[test]
+    fn stale_prunable_worktree_does_not_block_dead_owner_sweep() {
+        let (_temp, primary, git_dir) = setup_repo();
+        let root = _temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let stale = _temp.path().join("a-stale-parent").join("stale-worktree");
+        let added = Command::new("git")
+            .arg(format!("--git-dir={}", git_dir.display()))
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&stale)
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        std::fs::remove_dir_all(stale.parent().unwrap()).unwrap();
+        assert!(!stale.exists());
+        assert!(!stale.parent().unwrap().exists());
+        let dead = add_registered_worktree(&root, &git_dir, "after-stale");
+        let listing = Command::new("git")
+            .arg(format!("--git-dir={}", git_dir.display()))
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        assert!(listing.contains(&format!("worktree {}", stale.display())));
+        assert!(super::registered_worktree(&git_dir, &dead).unwrap());
+        let lock = lock_path(&dead);
+        assert_eq!(listed_worktree_count(&primary), 3);
+        assert_eq!(sweep(&root, Duration::ZERO), 1);
+        assert!(!dead.exists());
+        assert!(!lock.exists());
+        assert_eq!(listed_worktree_count(&primary), 2);
+    }
+
+    #[test]
+    fn failed_post_checkout_add_removes_registered_worktree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (temp, primary, git_dir) = setup_repo();
+        let marker = temp.path().join("post-checkout-ran");
+        let hooks = temp.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        let post_checkout = hooks.join("post-checkout");
+        std::fs::write(
+            &post_checkout,
+            format!("#!/bin/sh\nprintf ran > '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&post_checkout, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(
+            &primary,
+            "git",
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+
+        let root = temp.path().join("root");
+        let result = Worktree::create(&root, &git_dir, "HEAD");
+        assert!(
+            result.is_err(),
+            "post-checkout hook should make git worktree add fail"
+        );
+        assert!(marker.exists(), "post-checkout hook did not run");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(listed_worktree_count(&primary), 1);
     }
 
     #[test]
