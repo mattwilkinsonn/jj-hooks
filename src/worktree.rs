@@ -128,6 +128,22 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
     let mut reaped = 0;
     for checkout in checkouts {
         let owner_path = lock_path(&checkout);
+        let checkout_metadata = match fs::symlink_metadata(&checkout) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                warn!("skipping symlink worktree candidate {}", checkout.display());
+                continue;
+            }
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                warn!(
+                    "failed to inspect worktree candidate {}: {error}",
+                    checkout.display()
+                );
+                continue;
+            }
+        };
+
         match OpenOptions::new().read(true).write(true).open(&owner_path) {
             Ok(mut owner) => match owner.try_lock() {
                 Err(std::fs::TryLockError::WouldBlock) => continue,
@@ -154,24 +170,33 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
                         if is_younger_than(&owner_path, &checkout, grace) {
                             continue;
                         }
-                        if checkout.exists()
-                            && let Err(error) = fs::remove_dir(&checkout)
-                        {
-                            warn!(
-                                "failed to remove empty worktree directory {}: {error}",
-                                checkout.display()
-                            );
-                        }
-                        if let Err(error) = fs::remove_file(&owner_path) {
-                            warn!(
-                                "failed to remove empty worktree owner file {}: {error}",
-                                owner_path.display()
-                            );
-                        } else {
-                            reaped += 1;
+                        let checkout_removed = match checkout_metadata {
+                            None => true,
+                            Some(metadata) if !metadata.is_dir() => false,
+                            Some(_) => match fs::remove_dir(&checkout) {
+                                Ok(()) => true,
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                                Err(error) => {
+                                    warn!(
+                                        "failed to remove empty worktree directory {}: {error}",
+                                        checkout.display()
+                                    );
+                                    false
+                                }
+                            },
+                        };
+                        if checkout_removed {
+                            match fs::remove_file(&owner_path) {
+                                Ok(()) => reaped += 1,
+                                Err(error) => warn!(
+                                    "failed to remove empty worktree owner file {}: {error}",
+                                    owner_path.display()
+                                ),
+                            }
                         }
                         continue;
                     }
+
                     let Some(git_dir) = parse_owner(&contents) else {
                         warn!(
                             "malformed worktree owner file {}; skipping",
@@ -179,37 +204,106 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
                         );
                         continue;
                     };
-                    match Command::new("git")
-                        .arg(format!("--git-dir={}", git_dir.display()))
-                        .args(["worktree", "remove", "--force", "--force"])
-                        .arg(&checkout)
-                        .output()
-                    {
-                        Ok(output) if !output.status.success() => warn!(
-                            "git worktree remove failed for {}: {}",
-                            checkout.display(),
-                            String::from_utf8_lossy(&output.stderr)
-                        ),
-                        Err(error) => warn!(
-                            "failed to remove dead-owner git worktree {}: {error}",
-                            checkout.display()
-                        ),
-                        _ => {}
-                    }
-                    if checkout.exists()
-                        && let Err(error) = fs::remove_dir_all(&checkout)
+                    if let Some(metadata) = &checkout_metadata
+                        && !metadata.is_dir()
                     {
                         warn!(
-                            "failed to remove dead-owner worktree directory {}: {error}",
+                            "skipping non-directory worktree candidate {}",
                             checkout.display()
                         );
+                        continue;
                     }
-                    if let Err(error) = fs::remove_file(&owner_path) {
-                        warn!(
-                            "failed to remove dead-owner lock {}: {error}",
-                            owner_path.display()
-                        );
-                    } else {
+                    let registered = match registered_worktree(&git_dir, &checkout) {
+                        Ok(registered) => registered,
+                        Err(error) => {
+                            warn!(
+                                "failed to verify worktree registration for {}: {error}",
+                                checkout.display()
+                            );
+                            continue;
+                        }
+                    };
+                    if registered {
+                        let output = match Command::new("git")
+                            .arg(format!("--git-dir={}", git_dir.display()))
+                            .args(["worktree", "remove", "--force", "--force"])
+                            .arg(&checkout)
+                            .output()
+                        {
+                            Ok(output) => output,
+                            Err(error) => {
+                                warn!(
+                                    "failed to remove dead-owner git worktree {}: {error}",
+                                    checkout.display()
+                                );
+                                continue;
+                            }
+                        };
+                        if !output.status.success() {
+                            warn!(
+                                "git worktree remove failed for {}: {}",
+                                checkout.display(),
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                            continue;
+                        }
+                        if checkout_metadata.is_some() {
+                            match fs::remove_dir_all(&checkout) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => {
+                                    warn!(
+                                        "failed to remove dead-owner worktree directory {}: {error}",
+                                        checkout.display()
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    } else if let Some(metadata) = checkout_metadata {
+                        if !metadata.is_dir() {
+                            warn!(
+                                "unregistered worktree candidate {} is not a directory; skipping",
+                                checkout.display()
+                            );
+                            continue;
+                        }
+                        let is_empty = match fs::read_dir(&checkout) {
+                            Ok(mut entries) => match entries.next() {
+                                None => true,
+                                Some(Ok(_)) => false,
+                                Some(Err(error)) => {
+                                    warn!(
+                                        "failed to inspect unregistered worktree directory {}: {error}",
+                                        checkout.display()
+                                    );
+                                    continue;
+                                }
+                            },
+                            Err(error) => {
+                                warn!(
+                                    "failed to inspect unregistered worktree directory {}: {error}",
+                                    checkout.display()
+                                );
+                                continue;
+                            }
+                        };
+                        if !is_empty {
+                            warn!(
+                                "unregistered worktree candidate {} is not empty; skipping",
+                                checkout.display()
+                            );
+                            continue;
+                        }
+                        if let Err(error) = fs::remove_dir(&checkout) {
+                            warn!(
+                                "failed to remove empty unregistered worktree directory {}: {error}",
+                                checkout.display()
+                            );
+                            continue;
+                        }
+                    }
+                    if unlink_owner(&owner_path) {
                         reaped += 1;
                     }
                 }
@@ -234,6 +328,54 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
         }
     }
     reaped
+}
+
+fn registered_worktree(git_dir: &Path, checkout: &Path) -> std::io::Result<bool> {
+    let output = Command::new("git")
+        .arg(format!("--git-dir={}", git_dir.display()))
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let checkout = canonicalize_missing_path(checkout)?;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix("worktree ")
+            && canonicalize_missing_path(Path::new(path))? == checkout
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn canonicalize_missing_path(path: &Path) -> std::io::Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let name = path.file_name().ok_or(error)?;
+            Ok(fs::canonicalize(parent)?.join(name))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn unlink_owner(owner_path: &Path) -> bool {
+    match fs::remove_file(owner_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            warn!(
+                "failed to remove worktree owner file {}: {error}",
+                owner_path.display()
+            );
+            false
+        }
+    }
 }
 
 fn is_younger_than(path: &Path, fallback: &Path, grace: Duration) -> bool {
@@ -298,7 +440,20 @@ pub struct Worktree {
 impl Worktree {
     /// Create a detached worktree at `commit` using the given primary git dir.
     pub fn create(root: &Path, git_dir: &Path, commit: &str) -> Result<Self> {
+        let root_existed = root.exists();
         fs::create_dir_all(root)?;
+        if !root_existed {
+            let parent = root
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+                warn!(
+                    "failed to sync worktree root parent {}: {error}",
+                    parent.display()
+                );
+            }
+        }
         {
             let mut swept = SWEPT
                 .lock()
@@ -314,7 +469,11 @@ impl Worktree {
             .write(true)
             .create_new(true)
             .open(&lock_path)?;
-        owner.lock()?;
+        if let Err(error) = owner.lock() {
+            drop(owner);
+            let _ = fs::remove_file(&lock_path);
+            return Err(error.into());
+        }
         let mut worktree = Self {
             git_dir: git_dir.to_owned(),
             checkout,
@@ -322,6 +481,7 @@ impl Worktree {
             owner,
             removed: false,
         };
+        let mut git_add_succeeded = false;
 
         let result = (|| {
             write_owner(&mut worktree.owner, git_dir)?;
@@ -351,12 +511,13 @@ impl Worktree {
                     ),
                 });
             }
+            git_add_succeeded = true;
             Ok(())
         })();
 
         if let Err(error) = result {
-            if let Err(cleanup_error) = worktree.remove() {
-                warn!("failed to clean up worktree after creation failed: {cleanup_error}");
+            if !git_add_succeeded {
+                worktree.remove_locally()?;
             }
             return Err(error);
         }
@@ -369,6 +530,19 @@ impl Worktree {
 
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
+    }
+
+    fn remove_locally(&mut self) -> std::io::Result<()> {
+        if self.checkout.path().exists() {
+            fs::remove_dir_all(self.checkout.path())?;
+        }
+        match fs::remove_file(&self.lock_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.removed = true;
+        Ok(())
     }
 
     fn remove(&mut self) -> std::io::Result<()> {
@@ -385,18 +559,17 @@ impl Worktree {
             .output()?;
         drop(_guard);
 
-        // Delete local state even when git refuses (e.g. add never registered it).
-        if self.checkout.path().exists() {
-            fs::remove_dir_all(self.checkout.path())?;
-        }
-        fs::remove_file(&self.lock_path)?;
-        self.removed = true;
         if !output.status.success() {
             return Err(std::io::Error::other(format!(
                 "git worktree remove failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
+        if self.checkout.path().exists() {
+            fs::remove_dir_all(self.checkout.path())?;
+        }
+        fs::remove_file(&self.lock_path)?;
+        self.removed = true;
         Ok(())
     }
 }
@@ -463,6 +636,42 @@ mod tests {
         Worktree::create(root, git_dir, "HEAD").unwrap()
     }
 
+    fn add_registered_worktree(root: &Path, git_dir: &Path, name: &str) -> PathBuf {
+        let path = root.join(format!("{}{name}", super::WORKTREE_PREFIX));
+        let output = Command::new("git")
+            .arg(format!("--git-dir={}", git_dir.display()))
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&path)
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let owner_path = lock_path(&path);
+        std::fs::write(
+            &owner_path,
+            format!("{}\n{}\n", std::process::id(), git_dir.display()),
+        )
+        .unwrap();
+        path
+    }
+
+    fn listed_worktree_count(primary: &Path) -> usize {
+        let listing = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(primary)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count()
+    }
+
     #[test]
     fn failed_add_leaves_no_checkout_or_lock() {
         let (temp, _primary, git_dir) = setup_repo();
@@ -490,33 +699,13 @@ mod tests {
         let (_temp, primary, git_dir) = setup_repo();
         let root = _temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
-        let worktree = create_worktree(&root, &git_dir);
-        let path = worktree.path().to_path_buf();
+        let path = add_registered_worktree(&root, &git_dir, "sweep");
         let owner_path = lock_path(&path);
-        drop(worktree);
-        std::fs::create_dir(&path).unwrap();
-        std::fs::write(
-            &owner_path,
-            format!("{}\n{}\n", std::process::id(), git_dir.display()),
-        )
-        .unwrap();
+        assert_eq!(listed_worktree_count(&primary), 2);
         assert_eq!(sweep(&root, Duration::ZERO), 1);
         assert!(!path.exists());
         assert!(!owner_path.exists());
-        let listing = Command::new("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(primary)
-            .output()
-            .unwrap();
-        let listing = String::from_utf8_lossy(&listing.stdout);
-        assert_eq!(
-            listing
-                .lines()
-                .filter(|line| line.starts_with("worktree "))
-                .count(),
-            1,
-            "{listing}"
-        );
+        assert_eq!(listed_worktree_count(&primary), 1);
     }
 
     #[test]
@@ -526,31 +715,13 @@ mod tests {
         let alias = _temp.path().join("alias");
         std::fs::create_dir(&root).unwrap();
         std::os::unix::fs::symlink(&root, &alias).unwrap();
-        let worktree = create_worktree(&root, &git_dir);
-        let path = worktree.path().to_path_buf();
+        let path = add_registered_worktree(&root, &git_dir, "symlink");
         let owner_path = lock_path(&path);
-        drop(worktree);
-        std::fs::create_dir(&path).unwrap();
-        std::fs::write(
-            &owner_path,
-            format!("{}\n{}\n", std::process::id(), git_dir.display()),
-        )
-        .unwrap();
+        assert_eq!(listed_worktree_count(&primary), 2);
         assert_eq!(sweep(&alias, Duration::ZERO), 1);
         assert!(!path.exists());
         assert!(!owner_path.exists());
-        let listing = Command::new("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(primary)
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&listing.stdout)
-                .lines()
-                .filter(|line| line.starts_with("worktree "))
-                .count(),
-            1
-        );
+        assert_eq!(listed_worktree_count(&primary), 1);
     }
 
     #[test]
@@ -568,6 +739,7 @@ mod tests {
             .output()
             .unwrap();
         assert!(added.status.success(), "{added:?}");
+        assert_eq!(listed_worktree_count(&primary), 2);
         std::fs::remove_dir_all(&path).unwrap();
         let lock_path = lock_path(&path);
         std::fs::write(
@@ -577,18 +749,30 @@ mod tests {
         .unwrap();
         assert_eq!(sweep(&root, Duration::ZERO), 1);
         assert!(!lock_path.exists());
-        let listing = Command::new("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(primary)
-            .output()
-            .unwrap();
+        assert_eq!(listed_worktree_count(&primary), 1);
+    }
+
+    #[test]
+    fn sweep_preserves_foreign_nonempty_directory_with_forged_owner() {
+        let (_temp, _primary, git_dir) = setup_repo();
+        let root = _temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let checkout = root.join(format!("{}foreign", super::WORKTREE_PREFIX));
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("keep"), "foreign data").unwrap();
+        let owner_path = lock_path(&checkout);
+        std::fs::write(
+            &owner_path,
+            format!("{}\n{}\n", std::process::id(), git_dir.display()),
+        )
+        .unwrap();
+
+        assert_eq!(sweep(&root, Duration::ZERO), 0);
         assert_eq!(
-            String::from_utf8_lossy(&listing.stdout)
-                .lines()
-                .filter(|line| line.starts_with("worktree "))
-                .count(),
-            1
+            std::fs::read_to_string(checkout.join("keep")).unwrap(),
+            "foreign data"
         );
+        assert!(owner_path.exists());
     }
 
     #[test]

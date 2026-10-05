@@ -124,6 +124,11 @@ fn failing_hook_cleans_configured_worktree_root() {
 }
 
 #[cfg(target_os = "linux")]
+fn file_has_content(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|contents| !contents.is_empty())
+}
+
+#[cfg(target_os = "linux")]
 const PRE_PUSH_SLEEPER: &str = r#"
 repos:
   - repo: local
@@ -172,7 +177,9 @@ fn next_push_sweeps_worktree_after_owner_is_killed() {
         &log,
     );
     let deadline = Instant::now() + Duration::from_secs(20);
-    while (!cwd_out.exists() || !pgrp_out.exists() || !pid_out.exists())
+    while (!file_has_content(&cwd_out)
+        || !file_has_content(&pgrp_out)
+        || !file_has_content(&pid_out))
         && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(20));
