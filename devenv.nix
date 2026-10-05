@@ -49,6 +49,7 @@ in
     lefthook
     pkl
     inputs.hk.packages.${pkgs.stdenv.system}.hk
+    util-linux
   ];
 
   # Crate checks. Named ci:* so `devenv tasks run ci` (a namespace-prefix selector) runs

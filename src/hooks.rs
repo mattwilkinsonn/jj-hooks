@@ -153,6 +153,7 @@ pub fn run_for_update(
     update: &BookmarkUpdate,
     opts: RunOpts,
 ) -> Result<HookOutcome> {
+    let worktree_root = crate::worktree::worktree_root(jj);
     // Compute the repo's devenv/direnv env ONCE, eagerly, before any
     // worktree/spawn. The returned Arc is intentionally discarded — the
     // side effect is populating the process-global cache that the spawn
@@ -168,6 +169,7 @@ pub fn run_for_update(
     run_for_update_with_cancel(
         jj,
         primary_git_dir,
+        &worktree_root,
         workspace_root,
         cli_runner,
         stage,
@@ -193,6 +195,7 @@ pub fn run_for_update(
 fn run_for_update_with_cancel(
     jj: &JjCli,
     primary_git_dir: &Path,
+    worktree_root: &Path,
     workspace_root: &Path,
     cli_runner: Option<Runner>,
     stage: Stage,
@@ -219,6 +222,7 @@ fn run_for_update_with_cancel(
     let initial = run_once(
         jj,
         primary_git_dir,
+        worktree_root,
         workspace_root,
         cli_runner,
         stage,
@@ -253,6 +257,7 @@ fn run_for_update_with_cancel(
     let retry = run_once(
         jj,
         primary_git_dir,
+        worktree_root,
         workspace_root,
         cli_runner,
         stage,
@@ -449,6 +454,7 @@ where
         crate::repo_env::repo_env_autoallow_enabled(jj),
     );
     crate::gate_cache::gate_cache(workspace_root, crate::gate_cache::gate_cache_enabled(jj));
+    let worktree_root = crate::worktree::worktree_root(jj);
     // One warm cache shared across the batch: the first per-bookmark run
     // for each distinct config validates it (serially) from its own
     // worktree; the rest reuse the now-warm `~/.pkl` cache.
@@ -461,6 +467,7 @@ where
             run_for_update_with_cancel(
                 jj,
                 primary_git_dir,
+                &worktree_root,
                 workspace_root,
                 cli_runner,
                 stage,
@@ -577,6 +584,7 @@ where
         crate::repo_env::repo_env_autoallow_enabled(jj),
     );
     crate::gate_cache::gate_cache(workspace_root, crate::gate_cache::gate_cache_enabled(jj));
+    let worktree_root = crate::worktree::worktree_root(jj);
     // One warm cache shared across all partitions (see
     // `run_for_updates_parallel`): each distinct config is warmed once,
     // serially, from its own target worktree.
@@ -589,6 +597,7 @@ where
             run_for_update_with_cancel(
                 jj,
                 primary_git_dir,
+                &worktree_root,
                 workspace_root,
                 cli_runner,
                 stage,
@@ -761,6 +770,7 @@ fn splice_runner_prefix(prefix: &[String], command_argv: &[String]) -> Vec<Strin
 fn run_once(
     jj: &JjCli,
     primary_git_dir: &Path,
+    worktree_root: &Path,
     workspace_root: &Path,
     cli_runner: Option<Runner>,
     stage: Stage,
@@ -781,7 +791,7 @@ fn run_once(
             cancelled: true,
         });
     }
-    let wt = Worktree::create(primary_git_dir, target_commit)?;
+    let wt = Worktree::create(worktree_root, primary_git_dir, target_commit)?;
 
     // User-declared setup commands (e.g. `bun install`) run inside
     // the worktree before the runner so hooks have install-time

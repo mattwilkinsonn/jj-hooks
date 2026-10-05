@@ -84,10 +84,10 @@ fn workspace_root_resolves_from_subdirectory() {
 fn worktree_creates_then_removes_on_drop() {
     let (_tmp, primary, commit_id) = setup_primary_repo();
     let git_dir = jj::primary_git_dir(&primary).unwrap();
-
+    let root = _tmp.path().join("worktrees");
     let path: PathBuf;
     {
-        let wt = Worktree::create(&git_dir, &commit_id).unwrap();
+        let wt = Worktree::create(&root, &git_dir, &commit_id).unwrap();
         path = wt.path().to_owned();
         assert!(path.exists(), "worktree dir should exist while guard alive");
         assert!(
@@ -118,9 +118,9 @@ fn worktree_in_secondary_workspace_uses_primary_git_dir() {
         "jj",
         &["workspace", "add", secondary.to_str().unwrap(), "-r", "@-"],
     );
-
     let git_dir = jj::primary_git_dir(&secondary).unwrap();
-    let wt = Worktree::create(&git_dir, &commit_id).unwrap();
+    let root = _tmp.path().join("worktrees");
+    let wt = Worktree::create(&root, &git_dir, &commit_id).unwrap();
     assert!(wt.path().join("hello.txt").exists());
 }
 

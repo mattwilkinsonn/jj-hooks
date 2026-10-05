@@ -11,6 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[cfg(target_os = "linux")]
+use std::process::{Child, Stdio};
 use tempfile::TempDir;
 
 pub struct TestRepo {
@@ -158,6 +160,30 @@ impl TestRepo {
         cmd.output().unwrap()
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn jj_hooks_spawn_with_env(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        log: &Path,
+    ) -> Child {
+        let stdout = std::fs::File::create(log).unwrap();
+        let stderr = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+        let mut command = Command::new("setsid");
+        command
+            .arg(env!("CARGO_BIN_EXE_jj-hp"))
+            .args(args)
+            .current_dir(&self.primary)
+            .env("PRE_COMMIT_HOME", &self.pre_commit_home)
+            .env("JJ_HOOKS_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        command.spawn().unwrap()
+    }
     /// Run jj-hp under a sanitized PATH that includes only the binaries
     /// in `allow` (resolved against the parent process's PATH and
     /// symlinked into a tempdir). Used to test the "runner binary not
