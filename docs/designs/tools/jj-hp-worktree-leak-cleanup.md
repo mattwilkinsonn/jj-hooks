@@ -347,7 +347,7 @@ Red after T2: jj-hp dies at once and the checkout stays.
 
 ## Resolved decisions
 
-None is open.
+Open: RIG-4482 asks Matt whether T3 ships or T1, T2 and T4 ship without it.
 
 1. **Version `0.4.0`.** `Worktree::create` is public, and `release.yml` runs
    `cargo publish -p jj-hooks --locked`.
