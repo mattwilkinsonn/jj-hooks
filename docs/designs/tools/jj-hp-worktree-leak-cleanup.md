@@ -341,13 +341,11 @@ Red after T2: jj-hp dies at once and the checkout stays.
 
 - [ ] T1 — root, durable owner lock, double-force remove; cleanup tests
 - [ ] T2 — lock-proven `sweep`, `setsid` harness; SIGKILL and `sweep` tests
-- [ ] T3 — `src/interrupt.rs` and wiring; signal, reader-wake, escalation,
+- [ ] T3 (parked on RIG-4482) — `src/interrupt.rs` and wiring; signal, reader-wake, escalation,
   add-stall, terminal and SIGHUP tests
 - [ ] T4 — README, doc comments, changelog, `0.4.0`, fleet-day `/tmp` check
 
 ## Resolved decisions
-
-Open: RIG-4482 asks Matt whether T3 ships or T1, T2 and T4 ship without it.
 
 1. **Version `0.4.0`.** `Worktree::create` is public, and `release.yml` runs
    `cargo publish -p jj-hooks --locked`.
@@ -361,3 +359,9 @@ Open: RIG-4482 asks Matt whether T3 ships or T1, T2 and T4 ship without it.
 4. **Legacy admin entries.** jj-hp leaves lock-less `/tmp` entries alone. The
    changelog gives a one-time `git worktree prune`; otherwise `git gc` prunes
    them after `gc.worktreePruneExpire` (3 months by default, git-config(1)).
+
+## Open Questions
+
+1. **T3 scope (RIG-4482, Matt).** Ship T3, or T1, T2 and T4 without it. T1
+   and T2 are needed either way and proceed; T3 is parked until the ruling, and
+   this record is updated to match before merge.
