@@ -371,7 +371,8 @@ struct Spawned {
 /// Spawn and register under `STATE`, so the child sees every later escalation.
 #[cfg(unix)]
 fn spawn(cmd: &mut Command, mode: Mode) -> Result<Spawned> {
-    let group = GROUP.load(Ordering::SeqCst);
+    // Cleanup needs no terminal, and its own group shields it from a repeated Ctrl-C.
+    let group = GROUP.load(Ordering::SeqCst) || mode == Mode::Cleanup;
     if group {
         cmd.process_group(0);
     }

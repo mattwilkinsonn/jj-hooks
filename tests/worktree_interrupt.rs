@@ -390,12 +390,8 @@ fn sigterm_during_fixup_ref_update_removes_fixup_ref_and_bookmark() {
     );
 }
 
-#[test]
-fn terminal_ctrl_c_keeps_children_in_foreground_group_and_cleans_up() {
-    let fixture = Fixture::new(PRE_PUSH_RECORD_SESSION);
-    fixture.set_setup(
-        r#"set -- $(cat /proc/$$/stat); printf "%s %s" "$5" "$6" > "$JJ_HOOKS_TEST_SETUP_OUT""#,
-    );
+/// Runs jj-hp under `script` so it has a controlling terminal.
+fn spawn_in_terminal(fixture: &Fixture, extra_env: &[(&str, String)]) -> Child {
     let command = format!(
         "exec '{}' {}",
         env!("CARGO_BIN_EXE_jj-hp"),
@@ -412,10 +408,19 @@ fn terminal_ctrl_c_keeps_children_in_foreground_group_and_cleans_up() {
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log));
-    for (key, value) in fixture.env() {
+    for (key, value) in fixture.env().into_iter().chain(extra_env.iter().cloned()) {
         script.env(key, value);
     }
-    let mut child = script.spawn().unwrap();
+    script.spawn().unwrap()
+}
+
+#[test]
+fn terminal_ctrl_c_keeps_children_in_foreground_group_and_cleans_up() {
+    let fixture = Fixture::new(PRE_PUSH_RECORD_SESSION);
+    fixture.set_setup(
+        r#"set -- $(cat /proc/$$/stat); printf "%s %s" "$5" "$6" > "$JJ_HOOKS_TEST_SETUP_OUT""#,
+    );
+    let mut child = spawn_in_terminal(&fixture, &[]);
     fixture.wait_for(&["pgrp", "setup"]);
 
     let hook = fixture.read("pgrp");
@@ -428,6 +433,58 @@ fn terminal_ctrl_c_keeps_children_in_foreground_group_and_cleans_up() {
 
     let (pgrp, _) = hook.split_once(' ').unwrap();
     send(SIGINT, &format!("-{pgrp}"));
+    let status = fixture.wait_exit(&mut child, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(130), "log: {}", fixture.log());
+    fixture.assert_worktrees_gone();
+    fixture.assert_nothing_pushed();
+}
+
+/// Stalls `git worktree remove` until the go file exists, recording its PID.
+const GIT_REMOVE_STALL: &str = r#"#!/bin/sh
+if [ "$2" = worktree ] && [ "$3" = remove ]; then
+  echo "$$" > "$JJ_HOOKS_TEST_PID_OUT"
+  while [ ! -e "$JJ_HOOKS_TEST_GO" ]; do sleep 0.05; done
+fi
+exec "$JJ_HOOKS_TEST_REAL_GIT" "$@"
+"#;
+
+#[test]
+fn terminal_second_ctrl_c_spares_stalled_cleanup() {
+    let fixture = Fixture::new(PRE_PUSH_RECORD_SESSION);
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let shim_dir = fixture.out("git-shim");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let shim = shim_dir.join("git");
+    std::fs::write(&shim, GIT_REMOVE_STALL).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = vec![shim_dir];
+    path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let path = std::env::join_paths(path).unwrap();
+    let mut child = spawn_in_terminal(
+        &fixture,
+        &[
+            ("PATH", path.into_string().unwrap()),
+            ("JJ_HOOKS_TEST_REAL_GIT", real_git.to_str().unwrap().into()),
+        ],
+    );
+    fixture.wait_for(&["pgrp"]);
+    let hook = fixture.read("pgrp");
+    let (pgrp, _) = hook.split_once(' ').unwrap();
+
+    send(SIGINT, &format!("-{pgrp}"));
+    fixture.wait_for(&["pid"]);
+    send(SIGINT, &format!("-{pgrp}"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !process_gone(&fixture.read("pid")),
+        "the second Ctrl-C killed the cleanup; log: {}",
+        fixture.log()
+    );
+
+    std::fs::write(fixture.out("go"), "go").unwrap();
     let status = fixture.wait_exit(&mut child, Duration::from_secs(10));
     assert_eq!(status.code(), Some(130), "log: {}", fixture.log());
     fixture.assert_worktrees_gone();
