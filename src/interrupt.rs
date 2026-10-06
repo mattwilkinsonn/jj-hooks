@@ -27,9 +27,12 @@ use rustix::process::{Pid, Signal};
 #[cfg(unix)]
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 
-/// The first watched signal received; set inside the signal handler, never cleared.
+/// The latest watched signal, stored by the handler itself.
 #[cfg(unix)]
-static PENDING: LazyLock<Arc<AtomicUsize>> = LazyLock::new(Default::default);
+static RAW: LazyLock<Arc<AtomicUsize>> = LazyLock::new(Default::default);
+/// The first signal, latched from [`RAW`] by the watcher and never changed after.
+#[cfg(unix)]
+static FIRST: AtomicUsize = AtomicUsize::new(0);
 #[cfg(unix)]
 static STATE: Mutex<State> = Mutex::new(State::new());
 /// Spawn children in their own process group (no controlling terminal).
@@ -45,6 +48,9 @@ static INSTALL: Once = Once::new();
 const READER_POLL: Duration = Duration::from_millis(100);
 #[cfg(unix)]
 const READER_GRACE: Duration = Duration::from_secs(1);
+/// How long a child's terminal-signal death waits for jj-hp's own handler.
+#[cfg(unix)]
+const HANDLER_GRACE: Duration = Duration::from_millis(200);
 
 #[cfg(unix)]
 struct State {
@@ -69,6 +75,8 @@ impl State {
 struct Tracked {
     pid: Pid,
     group: bool,
+    /// Cleanup children never receive forwarded signals.
+    cleanup: bool,
 }
 
 #[cfg(unix)]
@@ -101,25 +109,34 @@ fn lock() -> MutexGuard<'static, State> {
 ///
 /// The pending signal is sticky, so a long-lived host must not call this:
 /// after one interrupt every later spawn would be refused.
-pub fn install() {
+pub(crate) fn install() {
     #[cfg(unix)]
     INSTALL.call_once(install_handlers);
 }
 
+/// Signals to watch: Linux keeps an inherited ignore; elsewhere it is unknowable.
+#[cfg(unix)]
+fn select_signals(linux: bool, inherited_ignored: u64) -> Vec<i32> {
+    if linux {
+        [SIGINT, SIGTERM, SIGHUP]
+            .into_iter()
+            .filter(|&sig| inherited_ignored & signal_bit(sig) == 0)
+            .collect()
+    } else {
+        vec![SIGINT, SIGTERM]
+    }
+}
+
 #[cfg(unix)]
 fn install_handlers() {
-    let ignored = inherited_ignored();
     GROUP.store(std::fs::File::open("/dev/tty").is_err(), Ordering::SeqCst);
 
     let mut watched = Vec::new();
-    for sig in candidate_signals() {
-        if ignored & signal_bit(sig) != 0 {
-            continue;
-        }
+    for sig in select_signals(cfg!(target_os = "linux"), inherited_ignored()) {
         let Ok(value) = usize::try_from(sig) else {
             continue;
         };
-        match signal_hook::flag::register_usize(sig, Arc::clone(&PENDING), value) {
+        match signal_hook::flag::register_usize(sig, Arc::clone(&RAW), value) {
             Ok(_) => watched.push(sig),
             Err(error) => tracing::warn!("failed to watch signal {sig}: {error}"),
         }
@@ -128,6 +145,7 @@ fn install_handlers() {
         Ok(signals) => signals,
         Err(error) => {
             tracing::warn!("failed to start the signal watcher: {error}");
+            fail_closed(&watched);
             return;
         }
     };
@@ -137,11 +155,35 @@ fn install_handlers() {
         .name("jj-hp-signals".into())
         .spawn(move || {
             for sig in signals.forever() {
+                latch_first();
                 watch(sig);
             }
         });
     if let Err(error) = spawned {
         tracing::warn!("failed to start the signal watcher: {error}");
+        WATCHED.store(0, Ordering::SeqCst);
+        fail_closed(&watched);
+    }
+}
+
+/// Without a watcher nothing forwards signals, so they must stay fatal.
+#[cfg(unix)]
+fn fail_closed(watched: &[i32]) {
+    for &sig in watched {
+        let always = Arc::new(AtomicBool::new(true));
+        if let Err(error) = signal_hook::flag::register_conditional_default(sig, always) {
+            tracing::warn!("failed to restore the default action for signal {sig}: {error}");
+        }
+    }
+}
+
+/// Fix the first signal; the handler's own store keeps only the latest.
+#[cfg(unix)]
+fn latch_first() -> usize {
+    let raw = RAW.load(Ordering::SeqCst);
+    match FIRST.compare_exchange(0, raw, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => raw,
+        Err(first) => first,
     }
 }
 
@@ -156,7 +198,7 @@ fn watch(sig: i32) {
             }
         }
         Action::Send(signal) => {
-            for child in &state.children {
+            for child in state.children.iter().filter(|child| !child.cleanup) {
                 // A registered PID is our live child or zombie, so it is never reused.
                 if let Err(error) = send(*child, signal) {
                     tracing::debug!("failed to signal child {:?}: {error}", child.pid);
@@ -173,16 +215,6 @@ fn send(child: Tracked, signal: Signal) -> rustix::io::Result<()> {
     } else {
         rustix::process::kill_process(child.pid, signal)
     }
-}
-
-#[cfg(target_os = "linux")]
-fn candidate_signals() -> [i32; 3] {
-    [SIGINT, SIGTERM, SIGHUP]
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn candidate_signals() -> [i32; 2] {
-    [SIGINT, SIGTERM]
 }
 
 /// The `SigIgn` mask inherited from our parent, so `nohup` keeps working.
@@ -216,10 +248,10 @@ fn signal_bit(sig: i32) -> u64 {
 }
 
 /// The pending signal, if one interrupted this process.
-pub fn signal() -> Option<i32> {
+pub(crate) fn signal() -> Option<i32> {
     #[cfg(unix)]
     {
-        match PENDING.load(Ordering::SeqCst) {
+        match latch_first() {
             0 => None,
             sig => i32::try_from(sig).ok(),
         }
@@ -231,7 +263,7 @@ pub fn signal() -> Option<i32> {
 }
 
 /// Fail with [`JjHooksError::Interrupted`] once a signal is pending.
-pub fn check() -> Result<()> {
+pub(crate) fn check() -> Result<()> {
     match signal() {
         Some(signal) => Err(JjHooksError::Interrupted { signal }),
         None => Ok(()),
@@ -239,7 +271,7 @@ pub fn check() -> Result<()> {
 }
 
 /// Die by `signal` as if it had never been handled; else exit `128 + signal`.
-pub fn reraise(signal: i32) -> ExitCode {
+pub(crate) fn reraise(signal: i32) -> ExitCode {
     #[cfg(unix)]
     if let Err(error) = signal_hook::low_level::emulate_default_handler(signal) {
         tracing::warn!("failed to re-raise signal {signal}: {error}");
@@ -354,7 +386,11 @@ fn spawn(cmd: &mut Command, mode: Mode) -> Result<Spawned> {
     }
     let mut child = cmd.spawn()?;
     let pid = Pid::from_child(&child);
-    state.children.push(Tracked { pid, group });
+    state.children.push(Tracked {
+        pid,
+        group,
+        cleanup: mode == Mode::Cleanup,
+    });
     drop(state);
 
     let readers = if mode.captures() {
@@ -510,10 +546,12 @@ fn complete(spawned: Spawned, mode: Mode) -> Result<Output> {
         && let Some(sig) = status.signal()
         && (sig == SIGINT || sig == SIGHUP)
         && WATCHED.load(Ordering::SeqCst) & signal_bit(sig) != 0
-        && let Ok(value) = usize::try_from(sig)
     {
-        // The terminal sent it to jj-hp too; an earlier signal keeps priority.
-        let _ = PENDING.compare_exchange(0, value, Ordering::SeqCst, Ordering::SeqCst);
+        // A terminal signal hits jj-hp too, but our handler may lag the child's death.
+        let deadline = Instant::now() + HANDLER_GRACE;
+        while signal().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     if mode.checks() {
         check()?;
@@ -557,12 +595,12 @@ mod tests {
         assert_eq!(state.hits, 3);
     }
 
-    // Sets the sticky PENDING flag; relies on nextest's process-per-test.
+    // Sets the sticky pending signal; relies on nextest's process-per-test.
     #[test]
     fn status_refuses_to_spawn_once_interrupted() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("spawned");
-        PENDING.store(15, Ordering::SeqCst);
+        RAW.store(15, Ordering::SeqCst);
         let err = status(Command::new("touch").arg(&marker)).unwrap_err();
         assert!(
             matches!(err, JjHooksError::Interrupted { signal: 15 }),
@@ -570,6 +608,69 @@ mod tests {
         );
         assert!(!marker.exists(), "the child was spawned");
         assert!(lock().children.is_empty());
+    }
+
+    #[test]
+    fn pending_signal_keeps_the_first_of_mixed_signals() {
+        assert_eq!(signal(), None);
+        RAW.store(15, Ordering::SeqCst);
+        assert_eq!(signal(), Some(15));
+        // A later handler store overwrites RAW but not the latched signal.
+        RAW.store(2, Ordering::SeqCst);
+        assert_eq!(signal(), Some(15));
+        assert!(matches!(
+            check(),
+            Err(JjHooksError::Interrupted { signal: 15 })
+        ));
+    }
+
+    #[test]
+    fn forwarded_signals_skip_cleanup_children() {
+        let _live = LiveWorktree::new();
+        let hook = spawn(Command::new("sleep").arg("30"), Mode::Status).unwrap();
+        let cleanup = spawn(Command::new("sleep").arg("30"), Mode::Cleanup).unwrap();
+
+        watch(SIGTERM);
+        wait_exited(hook.pid).unwrap();
+        let hook_status = complete(hook, Mode::Cleanup).unwrap().status;
+        assert_eq!(hook_status.signal(), Some(SIGTERM));
+        // The same send reached any wrongly signalled sleep; give it time to die.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            rustix::process::waitid(
+                rustix::process::WaitId::Pid(cleanup.pid),
+                rustix::process::WaitIdOptions::EXITED
+                    | rustix::process::WaitIdOptions::NOWAIT
+                    | rustix::process::WaitIdOptions::NOHANG,
+            )
+            .unwrap()
+            .is_none(),
+            "the cleanup child was signalled"
+        );
+
+        rustix::process::kill_process(cleanup.pid, Signal::KILL).unwrap();
+        complete(cleanup, Mode::Cleanup).unwrap();
+    }
+
+    #[test]
+    fn self_signalling_child_is_not_an_interrupt() {
+        WATCHED.store(signal_bit(SIGINT), Ordering::SeqCst);
+        let out = output(Command::new("sh").args(["-c", "kill -INT $$"])).unwrap();
+        assert_eq!(out.status.signal(), Some(SIGINT));
+        assert_eq!(signal(), None);
+    }
+
+    #[test]
+    fn linux_watch_set_keeps_inherited_ignores() {
+        let ignored = signal_bit(SIGHUP) | signal_bit(SIGINT);
+        assert_eq!(select_signals(true, ignored), [SIGTERM]);
+        assert_eq!(select_signals(true, 0), [SIGINT, SIGTERM, SIGHUP]);
+    }
+
+    #[test]
+    fn non_linux_watch_set_is_int_and_term_regardless_of_ignores() {
+        assert_eq!(select_signals(false, 0), [SIGINT, SIGTERM]);
+        assert_eq!(select_signals(false, u64::MAX), [SIGINT, SIGTERM]);
     }
 
     #[test]

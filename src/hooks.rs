@@ -1003,14 +1003,15 @@ fn run_once(
 
     crate::interrupt::check()?;
     let fixup_commit =
-        maybe_build_fixup_commit(primary_git_dir, wt.path(), target_commit, &update.bookmark)?;
-
+        match build_and_import_fixup(jj, primary_git_dir, wt.path(), target_commit, update) {
+            Ok(commit) => commit,
+            Err(error) => {
+                // An interrupt can land after update-ref or import mutated refs.
+                forget_fixup(jj, primary_git_dir, &update.bookmark);
+                return Err(error);
+            }
+        };
     if fixup_commit.is_some() {
-        // Make jj aware of the new commit. --ignore-working-copy keeps
-        // this import from racing against any concurrent `jj` process
-        // (same lock-contention rationale as in push.rs).
-        jj.run(&["git", "import", "--ignore-working-copy"])?;
-
         // jj git import created a `jj-hooks-fixup/<bookmark>` jj bookmark
         // from the underlying refs/heads/jj-hooks-fixup/<bookmark> ref.
         // Clean both up immediately — the user almost always wants to
@@ -1019,20 +1020,7 @@ fn run_once(
         // around. The commit stays addressable by hash via `jj log`,
         // `jj show`, `jj squash --from <hash>` etc. since jj tracks it
         // in its own commit graph independent of the ref.
-        let temp_bookmark = fixup_bookmark(&update.bookmark);
-        // `jj bookmark forget` removes the jj bookmark, but in a
-        // secondary workspace it leaves the underlying refs/heads/<name>
-        // ref alive in the primary's git dir. Explicitly delete the
-        // git ref ourselves so the cleanup is uniform.
-        if let Err(error) = jj.run_cleanup(&[
-            "bookmark",
-            "forget",
-            &temp_bookmark,
-            "--ignore-working-copy",
-        ]) {
-            tracing::debug!("jj bookmark forget {temp_bookmark} failed: {error}");
-        }
-        let _ = delete_git_ref(primary_git_dir, &fixup_ref(&update.bookmark));
+        forget_fixup(jj, primary_git_dir, &update.bookmark);
     }
 
     crate::interrupt::check()?;
@@ -1042,6 +1030,45 @@ fn run_once(
         captured_output: captured,
         cancelled,
     })
+}
+
+/// Build the fixup commit and, if one was made, `jj git import` it.
+fn build_and_import_fixup(
+    jj: &JjCli,
+    primary_git_dir: &Path,
+    worktree: &Path,
+    target_commit: &str,
+    update: &BookmarkUpdate,
+) -> Result<Option<String>> {
+    let fixup_commit =
+        maybe_build_fixup_commit(primary_git_dir, worktree, target_commit, &update.bookmark)?;
+    if fixup_commit.is_some() {
+        // Make jj aware of the new commit. --ignore-working-copy keeps
+        // this import from racing against any concurrent `jj` process
+        // (same lock-contention rationale as in push.rs).
+        jj.run(&["git", "import", "--ignore-working-copy"])?;
+    }
+    Ok(fixup_commit)
+}
+
+/// Remove the temporary fixup bookmark and ref; runs even after an interrupt.
+fn forget_fixup(jj: &JjCli, primary_git_dir: &Path, bookmark: &str) {
+    let temp_bookmark = fixup_bookmark(bookmark);
+    // `jj bookmark forget` removes the jj bookmark, but in a
+    // secondary workspace it leaves the underlying refs/heads/<name>
+    // ref alive in the primary's git dir. Explicitly delete the
+    // git ref ourselves so the cleanup is uniform.
+    if let Err(error) = jj.run_cleanup(&[
+        "bookmark",
+        "forget",
+        &temp_bookmark,
+        "--ignore-working-copy",
+    ]) {
+        tracing::debug!("jj bookmark forget {temp_bookmark} failed: {error}");
+    }
+    if let Err(error) = delete_git_ref(primary_git_dir, &fixup_ref(bookmark)) {
+        tracing::debug!("deleting fixup ref for {bookmark} failed: {error}");
+    }
 }
 
 /// Run a hook subprocess. When `capture` is `Some`, the child's

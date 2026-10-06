@@ -359,7 +359,8 @@ Red after T2: jj-hp dies at once and the checkout stays.
 4. **Legacy admin entries.** jj-hp leaves lock-less `/tmp` entries alone. The
    changelog gives a one-time `git worktree prune`; otherwise `git gc` prunes
    them after `gc.worktreePruneExpire` (3 months by default, git-config(1)).
+5. **T3 scope.** Matt ruled to ship T3 (RIG-4482).
 
 ## Open Questions
 
-1. **T3 scope.** Matt ruled to ship T3 (RIG-4482).
+None.

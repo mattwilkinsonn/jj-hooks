@@ -61,17 +61,22 @@ record is left alone.
 
 ### Interrupts
 
-On SIGINT (Ctrl-C), SIGTERM or SIGHUP during a hook run, `jj-hp` stops its
-hook and setup processes, removes the worktree, and then dies by the same
-signal. It makes no fixup commit, advances no bookmark and does not push. The
-children get SIGTERM; a second signal sends SIGKILL, and a third exits at once.
-Without a terminal, each child runs in its own process group, so the signal
-reaches its whole tree. A signal already ignored when `jj-hp` starts (`nohup`)
-stays ignored on Linux; on other unix systems only SIGINT and SIGTERM are
-handled, and an inherited ignore of either is overridden. Limits:
+On Unix, a SIGINT (Ctrl-C) or SIGTERM during a hook run makes `jj-hp` stop
+its hook and setup processes, remove the worktree, and then die by the same
+signal; on Linux, SIGHUP does the same. It makes no fixup commit, advances no
+bookmark and does not push. The children get SIGTERM; a second signal sends
+SIGKILL, and a third exits at once. Without a terminal, each child runs in its
+own process group, so the signal reaches its whole tree. On Linux, a signal
+already ignored when `jj-hp` starts (`nohup`) stays ignored; on other Unix
+systems an inherited ignore of SIGINT or SIGTERM is overridden. Off Unix,
+interrupts are not handled. Limits:
 
 - A process that leaves its group (`setsid`, a daemonizing build server)
   escapes the signal. Files it writes after removal are left on disk.
+- With a terminal, children share the terminal's foreground group. Ctrl-C
+  reaches the whole group, but a SIGTERM or SIGHUP sent to the `jj-hp` PID
+  alone is forwarded only to its direct children; grandchildren keep running.
+  `jj-hp` cannot signal them without risking a reused PID.
 - With a terminal, a grandchild that ignores SIGINT can keep the worktree
   busy; the lock stays, so the next run's sweep reaps it.
 

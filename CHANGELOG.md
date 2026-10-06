@@ -6,16 +6,18 @@ All notable changes to jj-hooks are tracked here.
 
 ### Fixed
 
-- Ctrl-C, SIGTERM or SIGHUP during a hook run now removes the hook worktree
-  before `jj-hp` exits. The signal is forwarded to the hook as SIGTERM; a
-  second one sends SIGKILL, and a third exits at once. After an interrupt
-  `jj-hp` makes no fixup commit, advances no bookmark and does not push, and it
-  still dies by the signal it received.
+- On Unix, Ctrl-C or SIGTERM during a hook run now removes the hook worktree
+  before `jj-hp` exits; on Linux, SIGHUP does too. The signal is forwarded to
+  the hook as SIGTERM; a second one sends SIGKILL, and a third exits at once.
+  After an interrupt `jj-hp` makes no fixup commit, advances no bookmark,
+  leaves no temporary fixup ref or bookmark, and does not push, and it still
+  dies by the signal it received. Off Unix, interrupts are not handled.
 
 ### Changed
 
-- Off Linux, an inherited ignored SIGINT or SIGTERM (for example a `&` job in a
-  script) becomes catchable. On Linux, an inherited ignore stays in force.
+- On Unix systems other than Linux, an inherited ignored SIGINT or SIGTERM
+  (for example a `&` job in a script) becomes catchable. On Linux, an
+  inherited ignore stays in force.
 
 ## [0.4.0]
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use harness::{PRE_PUSH_PASSING, PRE_PUSH_SLEEPER, TestRepo, show};
+use harness::{PRE_PUSH_AUTOFIX, PRE_PUSH_PASSING, PRE_PUSH_SLEEPER, TestRepo, show};
 
 const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
@@ -45,6 +45,15 @@ repos:
         stages: [pre-push]
         always_run: true
         pass_filenames: false
+"#;
+
+/// Stalls once, after the fixup ref is committed; later transactions pass.
+const REF_TX_STALL: &str = r#"#!/bin/sh
+[ "$1" = committed ] || exit 0
+grep -q ' refs/heads/jj-hooks-fixup/' || exit 0
+[ -e "$JJ_HOOKS_TEST_PID_OUT" ] && exit 0
+echo "$$" > "$JJ_HOOKS_TEST_PID_OUT"
+while :; do sleep 0.1; done
 "#;
 
 struct Fixture {
@@ -321,17 +330,12 @@ fn second_sigterm_kills_term_ignoring_setup_step() {
     fixture.assert_nothing_pushed();
 }
 
-#[test]
-fn sigterm_during_stalled_worktree_add_removes_worktree() {
-    let fixture = Fixture::new(PRE_PUSH_PASSING);
+/// Points the primary's `core.hooksPath` at a dir holding one executable hook.
+fn install_git_hook(fixture: &Fixture, name: &str, body: &str) {
     let hooks = fixture.out("git-hooks");
     std::fs::create_dir(&hooks).unwrap();
-    let hook = hooks.join("post-checkout");
-    std::fs::write(
-        &hook,
-        "#!/bin/sh\necho \"$$\" > \"$JJ_HOOKS_TEST_PID_OUT\"\nwhile :; do sleep 0.1; done\n",
-    )
-    .unwrap();
+    let hook = hooks.join(name);
+    std::fs::write(&hook, body).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     harness::run(
         fixture.repo.primary(),
@@ -343,6 +347,16 @@ fn sigterm_during_stalled_worktree_add_removes_worktree() {
             hooks.to_str().unwrap(),
         ],
     );
+}
+
+#[test]
+fn sigterm_during_stalled_worktree_add_removes_worktree() {
+    let fixture = Fixture::new(PRE_PUSH_PASSING);
+    install_git_hook(
+        &fixture,
+        "post-checkout",
+        "#!/bin/sh\necho \"$$\" > \"$JJ_HOOKS_TEST_PID_OUT\"\nwhile :; do sleep 0.1; done\n",
+    );
 
     let mut child = fixture.spawn(&[]);
     fixture.wait_for(&["pid"]);
@@ -352,6 +366,28 @@ fn sigterm_during_stalled_worktree_add_removes_worktree() {
     fixture.assert_gone("pid");
     fixture.assert_worktrees_gone();
     fixture.assert_nothing_pushed();
+}
+
+#[test]
+fn sigterm_during_fixup_ref_update_removes_fixup_ref_and_bookmark() {
+    let fixture = Fixture::new(PRE_PUSH_AUTOFIX);
+    install_git_hook(&fixture, "reference-transaction", REF_TX_STALL);
+
+    let mut child = fixture.spawn(&[]);
+    fixture.wait_for(&["pid"]);
+    send(SIGTERM, &child.id().to_string());
+    let status = fixture.wait_exit(&mut child, Duration::from_secs(10));
+    assert_died_by(&fixture, status, SIGTERM);
+    fixture.assert_gone("pid");
+    fixture.assert_worktrees_gone();
+    fixture.assert_nothing_pushed();
+    let out = fixture.repo.jj(&["bookmark", "list", "--all-remotes"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let bookmarks = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !bookmarks.contains("jj-hooks-fixup"),
+        "fixup bookmark left: {bookmarks}"
+    );
 }
 
 #[test]

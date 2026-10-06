@@ -10,7 +10,7 @@ pub mod error;
 pub mod gate_cache;
 pub mod hooks;
 pub mod init;
-pub mod interrupt;
+pub(crate) mod interrupt;
 pub mod jj;
 pub mod push;
 pub mod push_tags;
