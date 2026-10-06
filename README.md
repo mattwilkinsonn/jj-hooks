@@ -53,12 +53,27 @@ A relative override is ignored with a warning.
 
 Each worktree has a sibling `<name>.lock` file that its `jj-hp` process holds
 locked for the worktree's lifetime. If a run dies without cleaning up
-(Ctrl-C, SIGKILL, a crash, power loss), the first worktree creation of the next
+(SIGKILL, a crash, power loss), the first worktree creation of the next
 `jj-hp` process in that root reaps every worktree whose lock is free and whose
 owner record proves it is a jj-hp worktree. An entry with an empty or missing
 owner record is kept for an hour after creation, and one with a malformed
-record is left alone. A worktree interrupted by a signal therefore stays on
-disk until the next run, not until reboot.
+record is left alone.
+
+### Interrupts
+
+On SIGINT (Ctrl-C), SIGTERM or SIGHUP during a hook run, `jj-hp` stops its
+hook and setup processes, removes the worktree, and then dies by the same
+signal. It makes no fixup commit, advances no bookmark and does not push. The
+children get SIGTERM; a second signal sends SIGKILL, and a third exits at once.
+Without a terminal, each child runs in its own process group, so the signal
+reaches its whole tree. A signal already ignored when `jj-hp` starts (`nohup`)
+stays ignored on Linux; on other unix systems only SIGINT and SIGTERM are
+handled, and an inherited ignore of either is overridden. Limits:
+
+- A process that leaves its group (`setsid`, a daemonizing build server)
+  escapes the signal. Files it writes after removal are left on disk.
+- With a terminal, a grandchild that ignores SIGINT can keep the worktree
+  busy; the lock stays, so the next run's sweep reaps it.
 
 Worktrees left in `/tmp` by versions before 0.4.0 have no lock file, so the
 sweep leaves them alone. Delete those directories, then run `git worktree prune`

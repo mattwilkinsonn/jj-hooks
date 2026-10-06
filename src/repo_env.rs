@@ -507,10 +507,7 @@ impl DirenvExporter {
 fn git_local_env_vars() -> &'static HashSet<String> {
     static VARS: OnceLock<HashSet<String>> = OnceLock::new();
     VARS.get_or_init(|| {
-        match Command::new("git")
-            .arg("rev-parse")
-            .arg("--local-env-vars")
-            .output()
+        match crate::interrupt::output(Command::new("git").arg("rev-parse").arg("--local-env-vars"))
         {
             Ok(out) if out.status.success() => {
                 let set: HashSet<String> = String::from_utf8_lossy(&out.stdout)

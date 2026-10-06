@@ -34,6 +34,10 @@ pub enum JjHooksError {
     )]
     RunnerNotFound { bin: String },
 
+    /// A watched signal arrived while a hook worktree was live.
+    #[error("interrupted by signal {signal}")]
+    Interrupted { signal: i32 },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

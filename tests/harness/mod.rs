@@ -167,10 +167,23 @@ impl TestRepo {
         extra_env: &[(&str, &str)],
         log: &Path,
     ) -> Child {
+        self.jj_hooks_spawn_wrapped(&[], args, extra_env, log)
+    }
+
+    /// `setsid <wrapper...> jj-hp <args>`; the wrapper must exec jj-hp so the PID stays jj-hp's.
+    #[cfg(target_os = "linux")]
+    pub fn jj_hooks_spawn_wrapped(
+        &self,
+        wrapper: &[&str],
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        log: &Path,
+    ) -> Child {
         let stdout = std::fs::File::create(log).unwrap();
         let stderr = std::fs::OpenOptions::new().append(true).open(log).unwrap();
         let mut command = Command::new("setsid");
         command
+            .args(wrapper)
             .arg(env!("CARGO_BIN_EXE_jj-hp"))
             .args(args)
             .current_dir(&self.primary)
@@ -584,6 +597,20 @@ repos:
       - id: ok
         name: ok
         entry: 'true'
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+"#;
+
+/// Records `$PWD` and its pgrp, then waits on a ticking background loop whose PID it records.
+pub const PRE_PUSH_SLEEPER: &str = r#"
+repos:
+  - repo: local
+    hooks:
+      - id: sleeper
+        name: sleeper
+        entry: sh -c 'set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (while :; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait'
         language: system
         stages: [pre-push]
         always_run: true
