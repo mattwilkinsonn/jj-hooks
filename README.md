@@ -561,7 +561,7 @@ muscle memory.
 
 ```bash
 direnv allow              # one-time: devenv shell provides the hook-runner stack (pre-commit, prek, lefthook, hk, pkl)
-devenv tasks run ci       # fmt + clippy + nextest
+devenv tasks run ci       # fmt + clippy + nextest + .github/scripts release-script regression tests
 ```
 
 The test suite includes integration tests that build real jj+git repos in

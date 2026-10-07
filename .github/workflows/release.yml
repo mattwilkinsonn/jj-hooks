@@ -367,9 +367,7 @@ jobs:
           # Main can advance while the release builds artifacts. Rebase the
           # formula bump over the latest main immediately before pushing so
           # the bot push stays a fast-forward instead of leaving the tap stale.
-          git fetch origin main:refs/remotes/origin/main
-          git rebase origin/main
-          git push origin HEAD:main
+          python3 "$GITHUB_WORKSPACE/.github/scripts/push-tap.py"
 
   # ----- Validate the freshly published tap installs end-to-end.
   validate-tap:
@@ -379,7 +377,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
