@@ -3,7 +3,7 @@
 //! with.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use crate::error::{JjHooksError, Result};
 
@@ -35,13 +35,26 @@ impl JjCli {
         self.run_inner(args, /*capture_stderr_always=*/ true)
     }
 
-    fn run_inner(&self, args: &[&str], capture_stderr_always: bool) -> Result<String> {
-        let output = Command::new("jj")
-            .args(args)
-            .args(["--color", "never"])
-            .current_dir(&self.cwd)
-            .output()?;
+    /// [`Self::run`] that still runs after an interrupt, for cleanup.
+    pub fn run_cleanup(&self, args: &[&str]) -> Result<String> {
+        let output = crate::interrupt::cleanup_output(&mut self.command(args))?;
+        Self::finish(output, false)
+    }
 
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new("jj");
+        cmd.args(args)
+            .args(["--color", "never"])
+            .current_dir(&self.cwd);
+        cmd
+    }
+
+    fn run_inner(&self, args: &[&str], capture_stderr_always: bool) -> Result<String> {
+        let output = crate::interrupt::output(&mut self.command(args))?;
+        Self::finish(output, capture_stderr_always)
+    }
+
+    fn finish(output: Output, capture_stderr_always: bool) -> Result<String> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             return Err(JjHooksError::JjFailed {

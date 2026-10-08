@@ -53,12 +53,32 @@ A relative override is ignored with a warning.
 
 Each worktree has a sibling `<name>.lock` file that its `jj-hp` process holds
 locked for the worktree's lifetime. If a run dies without cleaning up
-(Ctrl-C, SIGKILL, a crash, power loss), the first worktree creation of the next
+(SIGKILL, a crash, power loss), the first worktree creation of the next
 `jj-hp` process in that root reaps every worktree whose lock is free and whose
 owner record proves it is a jj-hp worktree. An entry with an empty or missing
 owner record is kept for an hour after creation, and one with a malformed
-record is left alone. A worktree interrupted by a signal therefore stays on
-disk until the next run, not until reboot.
+record is left alone.
+
+### Interrupts
+
+On Unix, a SIGINT (Ctrl-C) or SIGTERM during a hook run makes `jj-hp` stop
+its hook and setup processes, remove the worktree, and then die by the same
+signal; on Linux, SIGHUP does the same. It makes no fixup commit, advances no
+bookmark and does not push. The children get SIGTERM; a second signal sends
+SIGKILL, and a third exits at once. Without a terminal, each child runs in its
+own process group, so the signal reaches its whole tree. On Linux, a signal
+already ignored when `jj-hp` starts (`nohup`) stays ignored; on other Unix
+systems an inherited ignore of SIGINT or SIGTERM is overridden. Off Unix,
+interrupts are not handled. Limits:
+
+- A process that leaves its group (`setsid`, a daemonizing build server)
+  escapes the signal. Files it writes after removal are left on disk.
+- With a terminal, children share the terminal's foreground group. Ctrl-C
+  reaches the whole group, but a SIGTERM or SIGHUP sent to the `jj-hp` PID
+  alone is forwarded only to its direct children; grandchildren keep running.
+  `jj-hp` cannot signal them without risking a reused PID.
+- With a terminal, a grandchild that ignores SIGINT can keep the worktree
+  busy; the lock stays, so the next run's sweep reaps it.
 
 Worktrees left in `/tmp` by versions before 0.4.0 have no lock file, so the
 sweep leaves them alone. Delete those directories, then run `git worktree prune`

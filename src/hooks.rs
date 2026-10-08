@@ -166,7 +166,7 @@ pub fn run_for_update(
     // Record the gate-cache opt-out ONCE here too, beside repo-env, so the
     // spawn sites can point CARGO_TARGET_DIR at the primary `target/`.
     crate::gate_cache::gate_cache(workspace_root, crate::gate_cache::gate_cache_enabled(jj));
-    run_for_update_with_cancel(
+    let outcome = run_for_update_with_cancel(
         jj,
         primary_git_dir,
         &worktree_root,
@@ -177,7 +177,9 @@ pub fn run_for_update(
         opts,
         &Cancel::never(),
         None,
-    )
+    );
+    crate::interrupt::check()?;
+    outcome
 }
 
 /// Like [`run_for_update`] but takes a cancellation token so callers
@@ -325,7 +327,7 @@ fn run_hk_validate(argv: &[String], cwd: &Path, workspace_root: &Path) -> bool {
     // will use. JJ_HOOKS_WORKSPACE is set after so it always wins.
     crate::repo_env::apply_repo_env(&mut cmd, workspace_root);
     cmd.env("JJ_HOOKS_WORKSPACE", workspace_root);
-    match cmd.output() {
+    match crate::interrupt::output(&mut cmd) {
         Ok(out) if out.status.success() => true,
         Ok(out) => {
             tracing::debug!(
@@ -460,7 +462,7 @@ where
     // worktree; the rest reuse the now-warm `~/.pkl` cache.
     let warm = PklWarmCache::default();
     let warm = &warm;
-    run_updates_parallel_core(
+    let outcomes = run_updates_parallel_core(
         updates,
         opts.capture_output,
         |_idx, update, cancel| {
@@ -479,7 +481,9 @@ where
         },
         progress_start,
         progress,
-    )
+    );
+    crate::interrupt::check()?;
+    outcomes
 }
 
 /// Orchestration core for [`run_for_updates_parallel`], parameterized
@@ -590,7 +594,7 @@ where
     // serially, from its own target worktree.
     let warm = PklWarmCache::default();
     let warm = &warm;
-    run_partitioned_updates_parallel_core(
+    let outcomes = run_partitioned_updates_parallel_core(
         partitions,
         opts.capture_output,
         |_p_idx, _u_idx, update, cancel| {
@@ -609,7 +613,9 @@ where
         },
         progress_start,
         progress,
-    )
+    );
+    crate::interrupt::check()?;
+    outcomes
 }
 
 /// Orchestration core for [`run_for_partitioned_updates_parallel`].
@@ -783,6 +789,7 @@ fn run_once(
     cancel: &Cancel,
     warm: Option<&PklWarmCache>,
 ) -> Result<OnceOutcome> {
+    crate::interrupt::check()?;
     if cancel.is_cancelled() {
         return Ok(OnceOutcome {
             success: true,
@@ -948,6 +955,7 @@ fn run_once(
     };
     let mut cancelled = false;
     if all_files {
+        crate::interrupt::check()?;
         if cancel.is_cancelled() {
             cancelled = true;
         } else {
@@ -971,6 +979,7 @@ fn run_once(
             // hk config (fmt → clippy-native → clippy-wasm) this
             // saves ~30-60s on cold caches when a parallel sibling
             // bookmark already failed.
+            crate::interrupt::check()?;
             if cancel.is_cancelled() {
                 cancelled = true;
                 break;
@@ -992,15 +1001,17 @@ fn run_once(
         }
     }
 
+    crate::interrupt::check()?;
     let fixup_commit =
-        maybe_build_fixup_commit(primary_git_dir, wt.path(), target_commit, &update.bookmark)?;
-
+        match build_and_import_fixup(jj, primary_git_dir, wt.path(), target_commit, update) {
+            Ok(commit) => commit,
+            Err(error) => {
+                // An interrupt can land after update-ref or import mutated refs.
+                forget_fixup(jj, primary_git_dir, &update.bookmark);
+                return Err(error);
+            }
+        };
     if fixup_commit.is_some() {
-        // Make jj aware of the new commit. --ignore-working-copy keeps
-        // this import from racing against any concurrent `jj` process
-        // (same lock-contention rationale as in push.rs).
-        jj.run(&["git", "import", "--ignore-working-copy"])?;
-
         // jj git import created a `jj-hooks-fixup/<bookmark>` jj bookmark
         // from the underlying refs/heads/jj-hooks-fixup/<bookmark> ref.
         // Clean both up immediately — the user almost always wants to
@@ -1009,26 +1020,55 @@ fn run_once(
         // around. The commit stays addressable by hash via `jj log`,
         // `jj show`, `jj squash --from <hash>` etc. since jj tracks it
         // in its own commit graph independent of the ref.
-        let temp_bookmark = fixup_bookmark(&update.bookmark);
-        // `jj bookmark forget` removes the jj bookmark, but in a
-        // secondary workspace it leaves the underlying refs/heads/<name>
-        // ref alive in the primary's git dir. Explicitly delete the
-        // git ref ourselves so the cleanup is uniform.
-        let _ = jj.run(&[
-            "bookmark",
-            "forget",
-            &temp_bookmark,
-            "--ignore-working-copy",
-        ]);
-        let _ = delete_git_ref(primary_git_dir, &fixup_ref(&update.bookmark));
+        forget_fixup(jj, primary_git_dir, &update.bookmark);
     }
 
+    crate::interrupt::check()?;
     Ok(OnceOutcome {
         success,
         fixup_commit,
         captured_output: captured,
         cancelled,
     })
+}
+
+/// Build the fixup commit and, if one was made, `jj git import` it.
+fn build_and_import_fixup(
+    jj: &JjCli,
+    primary_git_dir: &Path,
+    worktree: &Path,
+    target_commit: &str,
+    update: &BookmarkUpdate,
+) -> Result<Option<String>> {
+    let fixup_commit =
+        maybe_build_fixup_commit(primary_git_dir, worktree, target_commit, &update.bookmark)?;
+    if fixup_commit.is_some() {
+        // Make jj aware of the new commit. --ignore-working-copy keeps
+        // this import from racing against any concurrent `jj` process
+        // (same lock-contention rationale as in push.rs).
+        jj.run(&["git", "import", "--ignore-working-copy"])?;
+    }
+    Ok(fixup_commit)
+}
+
+/// Remove the temporary fixup bookmark and ref; runs even after an interrupt.
+fn forget_fixup(jj: &JjCli, primary_git_dir: &Path, bookmark: &str) {
+    let temp_bookmark = fixup_bookmark(bookmark);
+    // `jj bookmark forget` removes the jj bookmark, but in a
+    // secondary workspace it leaves the underlying refs/heads/<name>
+    // ref alive in the primary's git dir. Explicitly delete the
+    // git ref ourselves so the cleanup is uniform.
+    if let Err(error) = jj.run_cleanup(&[
+        "bookmark",
+        "forget",
+        &temp_bookmark,
+        "--ignore-working-copy",
+    ]) {
+        tracing::debug!("jj bookmark forget {temp_bookmark} failed: {error}");
+    }
+    if let Err(error) = delete_git_ref(primary_git_dir, &fixup_ref(bookmark)) {
+        tracing::debug!("deleting fixup ref for {bookmark} failed: {error}");
+    }
 }
 
 /// Run a hook subprocess. When `capture` is `Some`, the child's
@@ -1059,11 +1099,11 @@ fn run_subprocess(
     cmd.env("JJ_HOOKS_WORKSPACE", workspace_root);
     match capture {
         None => {
-            let status = cmd.status()?;
+            let status = crate::interrupt::status(&mut cmd)?;
             Ok(status.success())
         }
         Some(buf) => {
-            let output = cmd.output()?;
+            let output = crate::interrupt::output(&mut cmd)?;
             // Tag the captured block with the argv so the user can
             // see which subprocess produced each chunk when N hook
             // backends are multiplexed.
@@ -1168,11 +1208,12 @@ fn resolve_from_refs(jj: &JjCli, update: &BookmarkUpdate) -> Result<DiffBase> {
 }
 
 fn changed_files(worktree: &Path, from: &str, to: &str) -> Result<Vec<PathBuf>> {
-    let out = Command::new("git")
-        .args(["diff", "--name-only", "--diff-filter=ACMR"])
-        .arg(format!("{from}..{to}"))
-        .current_dir(worktree)
-        .output()?;
+    let out = crate::interrupt::output(
+        Command::new("git")
+            .args(["diff", "--name-only", "--diff-filter=ACMR"])
+            .arg(format!("{from}..{to}"))
+            .current_dir(worktree),
+    )?;
     if !out.status.success() {
         return Err(JjHooksError::JjFailed {
             status: out.status.code().unwrap_or(-1),
@@ -1311,10 +1352,11 @@ fn sanitize_for_ref(s: &str) -> String {
 /// after `jj git import` + `jj bookmark forget` from a secondary
 /// workspace (where forget leaves the underlying ref alive).
 fn delete_git_ref(git_dir: &Path, ref_name: &str) -> Result<()> {
-    let out = Command::new("git")
-        .arg(format!("--git-dir={}", git_dir.display()))
-        .args(["update-ref", "-d", ref_name])
-        .output()?;
+    let out = crate::interrupt::cleanup_output(
+        Command::new("git")
+            .arg(format!("--git-dir={}", git_dir.display()))
+            .args(["update-ref", "-d", ref_name]),
+    )?;
     if !out.status.success() {
         // Treat any failure as best-effort: if the ref didn't exist,
         // that's the desired state already.
@@ -1327,7 +1369,7 @@ fn delete_git_ref(git_dir: &Path, ref_name: &str) -> Result<()> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
-    let out = Command::new("git").args(args).current_dir(cwd).output()?;
+    let out = crate::interrupt::output(Command::new("git").args(args).current_dir(cwd))?;
     if !out.status.success() {
         return Err(JjHooksError::JjFailed {
             status: out.status.code().unwrap_or(-1),
@@ -1341,7 +1383,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn run_git_capture(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").args(args).current_dir(cwd).output()?;
+    let out = crate::interrupt::output(Command::new("git").args(args).current_dir(cwd))?;
     if !out.status.success() {
         return Err(JjHooksError::JjFailed {
             status: out.status.code().unwrap_or(-1),
@@ -1355,11 +1397,12 @@ fn run_git_capture(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn run_git_capture_with_git_dir(git_dir: &Path, cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg(format!("--git-dir={}", git_dir.display()))
-        .args(args)
-        .current_dir(cwd)
-        .output()?;
+    let out = crate::interrupt::output(
+        Command::new("git")
+            .arg(format!("--git-dir={}", git_dir.display()))
+            .args(args)
+            .current_dir(cwd),
+    )?;
     if !out.status.success() {
         return Err(JjHooksError::JjFailed {
             status: out.status.code().unwrap_or(-1),

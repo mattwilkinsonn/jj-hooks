@@ -156,7 +156,8 @@ pub fn run_steps(steps: &[SetupStep], worktree: &Path, workspace_root: &Path) ->
         // Point CARGO_TARGET_DIR at the primary `target/` AFTER apply_repo_env
         // so a repo-env-carried value can never win. No-op unless enabled.
         crate::gate_cache::apply_gate_cache(&mut cmd, workspace_root);
-        let output = cmd.env("JJ_HOOKS_WORKSPACE", workspace_root).output()?;
+        cmd.env("JJ_HOOKS_WORKSPACE", workspace_root);
+        let output = crate::interrupt::output(&mut cmd)?;
 
         // Header line so the caller can tell which step produced
         // which captured output when there are multiple steps. Cheap

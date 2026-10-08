@@ -10,6 +10,7 @@ pub mod error;
 pub mod gate_cache;
 pub mod hooks;
 pub mod init;
+pub(crate) mod interrupt;
 pub mod jj;
 pub mod push;
 pub mod push_tags;
@@ -75,9 +76,14 @@ pub fn run() -> ExitCode {
         .without_time()
         .try_init();
 
+    interrupt::install();
     match dispatch(cli) {
         Ok(code) => code,
         Err(e) => {
+            // A signal outranks any error it caused, a sibling worker's included.
+            if let Some(signal) = interrupt::signal() {
+                return interrupt::reraise(signal);
+            }
             eprintln!("jj-hooks: {e}");
             ExitCode::from(1)
         }

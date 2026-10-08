@@ -16,6 +16,7 @@ use tempfile::TempDir;
 use tracing::warn;
 
 use crate::error::{JjHooksError, Result};
+use crate::interrupt::LiveWorktree;
 
 /// Prefix used for each hook worktree directory.
 pub const WORKTREE_PREFIX: &str = "jj-hooks-worktree-";
@@ -224,12 +225,12 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
                         }
                     };
                     if registered {
-                        let output = match Command::new("git")
-                            .arg(format!("--git-dir={}", git_dir.display()))
-                            .args(["worktree", "remove", "--force", "--force"])
-                            .arg(&checkout)
-                            .output()
-                        {
+                        let output = match crate::interrupt::cleanup_output(
+                            Command::new("git")
+                                .arg(format!("--git-dir={}", git_dir.display()))
+                                .args(["worktree", "remove", "--force", "--force"])
+                                .arg(&checkout),
+                        ) {
                             Ok(output) => output,
                             Err(error) => {
                                 warn!(
@@ -331,10 +332,12 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
 }
 
 fn registered_worktree(git_dir: &Path, checkout: &Path) -> std::io::Result<bool> {
-    let output = Command::new("git")
-        .arg(format!("--git-dir={}", git_dir.display()))
-        .args(["worktree", "list", "--porcelain"])
-        .output()?;
+    let output = crate::interrupt::cleanup_output(
+        Command::new("git")
+            .arg(format!("--git-dir={}", git_dir.display()))
+            .args(["worktree", "list", "--porcelain"]),
+    )
+    .map_err(std::io::Error::other)?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
             "git worktree list failed: {}",
@@ -434,12 +437,14 @@ fn write_owner(file: &mut File, git_dir: &Path) -> std::io::Result<()> {
 /// The lock prevents concurrent git worktree metadata creation races.
 static WORKTREE_CREATE_LOCK: Mutex<()> = Mutex::new(());
 
+// Drop order: `checkout` before `owner`, and `live` last so it covers all cleanup.
 pub struct Worktree {
     git_dir: PathBuf,
     checkout: TempDir,
     lock_path: PathBuf,
     owner: File,
     removed: bool,
+    _live: LiveWorktree,
 }
 
 impl Worktree {
@@ -467,6 +472,7 @@ impl Worktree {
                 sweep(root, CREATION_GRACE);
             }
         }
+        let live = LiveWorktree::new();
         let checkout = TempDir::with_prefix_in(WORKTREE_PREFIX, root)?;
         let lock_path = lock_path(checkout.path());
         let owner = OpenOptions::new()
@@ -485,6 +491,7 @@ impl Worktree {
             lock_path,
             owner,
             removed: false,
+            _live: live,
         };
         let mut git_add_failed = false;
         let result = (|| {
@@ -498,16 +505,19 @@ impl Worktree {
             let _guard = WORKTREE_CREATE_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let output = Command::new("git")
-                .arg(format!("--git-dir={}", git_dir.display()))
-                .args(["worktree", "add", "--detach", "--quiet"])
-                .arg(worktree.checkout.path())
-                .arg(commit)
-                .output()?;
+            let output = crate::interrupt::output(
+                Command::new("git")
+                    .arg(format!("--git-dir={}", git_dir.display()))
+                    .args(["worktree", "add", "--detach", "--quiet"])
+                    .arg(worktree.checkout.path())
+                    .arg(commit),
+            );
             drop(_guard);
+            // An interrupted add may already have registered the checkout.
+            git_add_failed = true;
+            let output = output?;
 
             if !output.status.success() {
-                git_add_failed = true;
                 return Err(JjHooksError::JjFailed {
                     status: output.status.code().unwrap_or(-1),
                     stderr: format!(
@@ -516,6 +526,7 @@ impl Worktree {
                     ),
                 });
             }
+            git_add_failed = false;
             Ok(())
         })();
 
@@ -575,11 +586,13 @@ impl Worktree {
         let _guard = WORKTREE_CREATE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let output = Command::new("git")
-            .arg(format!("--git-dir={}", self.git_dir.display()))
-            .args(["worktree", "remove", "--force", "--force"])
-            .arg(self.checkout.path())
-            .output()?;
+        let output = crate::interrupt::cleanup_output(
+            Command::new("git")
+                .arg(format!("--git-dir={}", self.git_dir.display()))
+                .args(["worktree", "remove", "--force", "--force"])
+                .arg(self.checkout.path()),
+        )
+        .map_err(std::io::Error::other)?;
         drop(_guard);
 
         if !output.status.success() {

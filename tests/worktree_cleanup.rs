@@ -5,6 +5,8 @@ mod harness;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+use harness::PRE_PUSH_SLEEPER;
 use harness::{TestRepo, show};
 
 const PRE_PUSH_RECORD_CWD: &str = r#"
@@ -129,20 +131,6 @@ fn file_has_content(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-const PRE_PUSH_SLEEPER: &str = r#"
-repos:
-  - repo: local
-    hooks:
-      - id: sleeper
-        name: sleeper
-        entry: sh -c 'set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (while :; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait'
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
-"#;
-
-#[cfg(target_os = "linux")]
 #[test]
 fn next_push_sweeps_worktree_after_owner_is_killed() {
     use std::process::Command;
@@ -195,11 +183,18 @@ fn next_push_sweeps_worktree_after_owner_is_killed() {
         cwd.starts_with(root.to_str().unwrap()),
         "sleeper cwd was {cwd:?}"
     );
+    let jj_hp_stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+    let jj_hp_session = jj_hp_stat
+        .rsplit_once(") ")
+        .and_then(|(_, rest)| rest.split_whitespace().nth(3))
+        .unwrap();
     assert_eq!(
-        pgrp.trim(),
+        jj_hp_session,
         child.id().to_string(),
         "jj-hp did not lead its session"
     );
+    // Without a terminal the hook runs in its own process group.
+    assert_ne!(pgrp.trim(), child.id().to_string());
     let sleeper_pid = std::fs::read_to_string(&pid_out).unwrap();
 
     child.kill().unwrap();
