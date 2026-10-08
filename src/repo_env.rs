@@ -1,7 +1,7 @@
 //! Propagate the repo's direnv/devenv environment into hook subprocesses.
 //!
 //! `jj-hp` runs pre-push hooks inside an ephemeral detached worktree under
-//! `/tmp`, and the hook subprocess otherwise inherits only jj-hp's own
+//! the worktree root, and the hook subprocess otherwise inherits only jj-hp's own
 //! process environment — the repo's direnv/devenv environment (the one CI
 //! loads via `devenv shell -- moon ci`) is never applied. Tools the runner
 //! shells out to (moon, biome, proto shims) then resolve against the *system*

@@ -1,10 +1,10 @@
 //! Point the gate subprocess's `CARGO_TARGET_DIR` at the PRIMARY workspace's
 //! `target/`, so the gate reuses the user's own warm dev builds instead of
-//! paying a cold from-scratch build in the ephemeral `/tmp` worktree (whose
+//! paying a cold from-scratch build in the ephemeral hook worktree (whose
 //! cargo `target/` is empty).
 //!
 //! `jj-hp` runs the pre-push gate (`moon ci` via hk) inside a fresh detached
-//! worktree under `/tmp`. That worktree's `target/` starts empty, so even a
+//! worktree under the worktree root. That worktree's `target/` starts empty, so even a
 //! correctly-scoped, sccache-backed build still pays a from-scratch link +
 //! incremental-cache miss (~35s measured) that a warm `target/` closes to a
 //! ~2-3s incremental build. This module injects `CARGO_TARGET_DIR =

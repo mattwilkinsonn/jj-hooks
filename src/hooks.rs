@@ -348,7 +348,7 @@ fn run_hk_validate(argv: &[String], cwd: &Path, workspace_root: &Path) -> bool {
 /// (`~/.cache/hk/configs/<path-keyed>.json`), so every ephemeral
 /// worktree must be warmed individually — deduping on config CONTENT
 /// would collapse same-content worktrees (every worktree has the same
-/// `hk.pkl` but a unique `/tmp` path) and leave all but one to race.
+/// `hk.pkl` but a unique worktree path) and leave all but one to race.
 /// Shared across all per-bookmark threads in one parallel batch; the
 /// sequential / single-bookmark paths pass no cache (no concurrency →
 /// no race).

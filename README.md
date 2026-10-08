@@ -15,7 +15,8 @@ they're identical.
 
 1. Asks jj which bookmarks the push would update on the remote.
 2. For each bookmark being added or moved, creates an ephemeral detached git
-   worktree at the target commit and runs the configured hook backend there.
+   worktree at the target commit (see [Hook worktrees](#hook-worktrees)) and
+   runs the configured hook backend there.
 3. If hooks fail or modify files, the push is aborted. Modifications get
    committed as a fixup commit whose hash is printed so you can `jj squash`
    the fixes into your target or inspect them with `jj show`.
@@ -35,6 +36,33 @@ files but the git index lives in the primary's `.git`, so pre-commit's
 `git worktree add --detach` checkout of the target commit. The user's
 working copy is never touched, and the same code path works in both
 primary and secondary workspaces.
+
+## Hook worktrees
+
+Hook worktrees live in an on-disk cache by default, not in `/tmp`: a full
+checkout can be gigabytes, and on hosts where `/tmp` is a RAM-backed tmpfs,
+leaked ones exhaust memory. The root is the first of:
+
+1. `JJ_HOOKS_WORKTREE_ROOT` (absolute path)
+2. jj config `jj-hooks.worktree-root` (absolute path)
+3. `$XDG_CACHE_HOME/jj-hooks/worktrees`, when `XDG_CACHE_HOME` is absolute
+4. `~/.cache/jj-hooks/worktrees`
+5. `<temp dir>/jj-hooks-worktrees`, with a warning; this may be tmpfs
+
+A relative override is ignored with a warning.
+
+Each worktree has a sibling `<name>.lock` file that its `jj-hp` process holds
+locked for the worktree's lifetime. If a run dies without cleaning up
+(Ctrl-C, SIGKILL, a crash, power loss), the first worktree creation of the next
+`jj-hp` process in that root reaps every worktree whose lock is free and whose
+owner record proves it is a jj-hp worktree. An entry with an empty or missing
+owner record is kept for an hour after creation, and one with a malformed
+record is left alone. A worktree interrupted by a signal therefore stays on
+disk until the next run, not until reboot.
+
+Worktrees left in `/tmp` by versions before 0.4.0 have no lock file, so the
+sweep leaves them alone. Delete those directories, then run `git worktree prune`
+in each affected repo.
 
 ## Prior art
 
@@ -298,7 +326,7 @@ before invoking `jj-hp`, or set `jj-hooks.runner-bin.<runner>`.
 
 ## Repo environment (direnv / devenv)
 
-Hooks run in an ephemeral `/tmp` worktree, so by default the hook subprocess
+Hooks run in an ephemeral worktree, so by default the hook subprocess
 inherits only `jj-hp`'s own process environment — **not** the repo's
 direnv/devenv environment. That means tools your hooks shell out to (moon,
 biome, proto shims, …) resolve against the *system* `$PATH` instead of the
