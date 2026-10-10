@@ -4,6 +4,10 @@ All notable changes to jj-hooks are tracked here.
 
 ## [Unreleased]
 
+## [0.5.0]
+
+Interrupted hook runs clean up after themselves.
+
 ### Fixed
 
 - On Unix, Ctrl-C or SIGTERM during a hook run now removes the hook worktree
