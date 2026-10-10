@@ -7,6 +7,9 @@ jobs:
   devenv-update:
     uses: mattwilkinsonn/dev-shared/.github/workflows/devenv-update.yml@v1
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
       id-token: write # the Determinate Nix action needs OIDC
+    with:
+      app-client-id: ${{ vars.DEVENV_UPDATE_APP_CLIENT_ID }}
+    secrets:
+      DEVENV_UPDATE_APP_PRIVATE_KEY: ${{ secrets.DEVENV_UPDATE_APP_PRIVATE_KEY }}
