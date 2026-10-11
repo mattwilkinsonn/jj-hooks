@@ -4,6 +4,10 @@ All notable changes to jj-hooks are tracked here.
 
 ## [Unreleased]
 
+## [0.6.0]
+
+Hook worktrees leave `~/.cache`.
+
 ### Changed
 
 - Hook worktrees default to `$XDG_STATE_HOME/jj-hooks/worktrees`, or
