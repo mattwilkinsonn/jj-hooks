@@ -128,13 +128,19 @@ impl TestRepo {
         capture_jj(cwd, args)
     }
 
+    /// Test-local temp dir, so jj-hp's `<temp dir>/jj-hooks-worktrees` retired
+    /// root never resolves to the host's.
+    pub fn scratch_tmp(&self) -> PathBuf {
+        let scratch = self.tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        scratch
+    }
+
     /// Point the retired default worktree roots into the tempdir, so a
     /// test's jj-hp never sweeps the host's `~/.cache` or temp-dir worktrees.
     pub fn isolate_worktree_roots(&self, cmd: &mut Command) {
-        let scratch = self.tmp.path().join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
         cmd.env("XDG_CACHE_HOME", self.tmp.path().join("xdg-cache"))
-            .env("TMPDIR", scratch);
+            .env("TMPDIR", self.scratch_tmp());
     }
 
     pub fn jj_hooks(&self, args: &[&str]) -> Output {
@@ -279,6 +285,7 @@ impl TestRepo {
             .env("PRE_COMMIT_HOME", &self.pre_commit_home)
             .env("JJ_HOOKS_LOG", "info")
             .env("HOME", self.tmp.path())
+            .env("TMPDIR", self.scratch_tmp())
             .output()
             .unwrap()
     }

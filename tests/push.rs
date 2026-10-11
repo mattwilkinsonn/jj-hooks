@@ -1400,6 +1400,7 @@ prek = "{}"
         .env("JJ_CONFIG", &jj_config)
         .env("JJ_HOOKS_LOG", "info")
         .env("HOME", repo.tmp.path())
+        .env("TMPDIR", repo.scratch_tmp())
         .output()
         .unwrap();
 
