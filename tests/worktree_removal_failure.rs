@@ -96,7 +96,8 @@ fn failed_git_removal_preserves_dead_owner_worktree_and_lock() {
     path_entries.extend(std::env::split_paths(&original_path));
     let path = std::env::join_paths(path_entries).unwrap();
     let removal_attempt = repo.tmp.path().join("git-remove-attempted");
-    let output = Command::new(env!("CARGO_BIN_EXE_jj-hp"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_jj-hp"));
+    command
         .args(["--runner", "pre-commit", "push", "-b", "main"])
         .current_dir(repo.primary())
         .env("PATH", path)
@@ -105,9 +106,9 @@ fn failed_git_removal_preserves_dead_owner_worktree_and_lock() {
         .env("JJ_HOOKS_WORKTREE_ROOT", &root)
         .env("JJ_HOOKS_TEST_REAL_GIT", &real_git)
         .env("JJ_HOOKS_TEST_GIT_REMOVE_OUT", &removal_attempt)
-        .env("JJ_HOOKS_TEST_FAIL_CHECKOUT", &checkout)
-        .output()
-        .unwrap();
+        .env("JJ_HOOKS_TEST_FAIL_CHECKOUT", &checkout);
+    repo.isolate_worktree_roots(&mut command);
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{}", show(&output));
 
     assert!(removal_attempt.exists(), "Git remove shim was not invoked");

@@ -4,6 +4,19 @@ All notable changes to jj-hooks are tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- Hook worktrees default to `$XDG_STATE_HOME/jj-hooks/worktrees`, or
+  `~/.local/state/jj-hooks/worktrees`, instead of `~/.cache`. Biome
+  mis-resolves nested `.gitignore` and `package.json` files under a `.cache`
+  path segment, so lint hooks failed in the hook worktree.
+
+### Fixed
+
+- Worktrees leaked under the previous default roots (`$XDG_CACHE_HOME` or
+  `~/.cache` and the temp dir) are reaped by the same lock-checked sweep,
+  once per `jj-hp` process.
+
 ## [0.5.0]
 
 Interrupted hook runs clean up after themselves.

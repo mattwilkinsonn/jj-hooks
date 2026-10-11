@@ -39,14 +39,16 @@ primary and secondary workspaces.
 
 ## Hook worktrees
 
-Hook worktrees live in an on-disk cache by default, not in `/tmp`: a full
-checkout can be gigabytes, and on hosts where `/tmp` is a RAM-backed tmpfs,
-leaked ones exhaust memory. The root is the first of:
+Hook worktrees live in an on-disk state directory by default, not in `/tmp`: a
+full checkout can be gigabytes, and on hosts where `/tmp` is a RAM-backed tmpfs,
+leaked ones exhaust memory. The default avoids `~/.cache` because Biome
+mis-resolves nested `.gitignore` and `package.json` files under a `.cache` path
+segment. The root is the first of:
 
 1. `JJ_HOOKS_WORKTREE_ROOT` (absolute path)
 2. jj config `jj-hooks.worktree-root` (absolute path)
-3. `$XDG_CACHE_HOME/jj-hooks/worktrees`, when `XDG_CACHE_HOME` is absolute
-4. `~/.cache/jj-hooks/worktrees`
+3. `$XDG_STATE_HOME/jj-hooks/worktrees`, when `XDG_STATE_HOME` is absolute
+4. `~/.local/state/jj-hooks/worktrees`
 5. `<temp dir>/jj-hooks-worktrees`, with a warning; this may be tmpfs
 
 A relative override is ignored with a warning.
@@ -58,6 +60,11 @@ locked for the worktree's lifetime. If a run dies without cleaning up
 owner record proves it is a jj-hp worktree. An entry with an empty or missing
 owner record is kept for an hour after creation, and one with a malformed
 record is left alone.
+
+Each `jj-hp` process also runs the same sweep once over the default roots of
+earlier releases (`$XDG_CACHE_HOME/jj-hooks/worktrees`,
+`~/.cache/jj-hooks/worktrees` and `<temp dir>/jj-hooks-worktrees`), so worktrees
+leaked there before the move are reaped too.
 
 ### Interrupts
 

@@ -128,19 +128,28 @@ impl TestRepo {
         capture_jj(cwd, args)
     }
 
+    /// Point the retired default worktree roots into the tempdir, so a
+    /// test's jj-hp never sweeps the host's `~/.cache` or temp-dir worktrees.
+    pub fn isolate_worktree_roots(&self, cmd: &mut Command) {
+        let scratch = self.tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        cmd.env("XDG_CACHE_HOME", self.tmp.path().join("xdg-cache"))
+            .env("TMPDIR", scratch);
+    }
+
     pub fn jj_hooks(&self, args: &[&str]) -> Output {
         self.jj_hooks_in(&self.primary, args)
     }
 
     pub fn jj_hooks_in(&self, cwd: &Path, args: &[&str]) -> Output {
         let bin = env!("CARGO_BIN_EXE_jj-hooks");
-        Command::new(bin)
-            .args(args)
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
             .current_dir(cwd)
             .env("PRE_COMMIT_HOME", &self.pre_commit_home)
-            .env("JJ_HOOKS_LOG", "info")
-            .output()
-            .unwrap()
+            .env("JJ_HOOKS_LOG", "info");
+        self.isolate_worktree_roots(&mut cmd);
+        cmd.output().unwrap()
     }
 
     /// Same as `jj_hooks` but inject extra env vars before invocation.
@@ -154,6 +163,7 @@ impl TestRepo {
             .current_dir(&self.primary)
             .env("PRE_COMMIT_HOME", &self.pre_commit_home)
             .env("JJ_HOOKS_LOG", "info");
+        self.isolate_worktree_roots(&mut cmd);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -192,6 +202,7 @@ impl TestRepo {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        self.isolate_worktree_roots(&mut command);
         for (key, value) in extra_env {
             command.env(key, value);
         }

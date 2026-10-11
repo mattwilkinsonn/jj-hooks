@@ -408,6 +408,7 @@ fn spawn_in_terminal(fixture: &Fixture, extra_env: &[(&str, String)]) -> Child {
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log));
+    fixture.repo.isolate_worktree_roots(&mut script);
     for (key, value) in fixture.env().into_iter().chain(extra_env.iter().cloned()) {
         script.env(key, value);
     }
