@@ -119,6 +119,7 @@ prek = "{}"
         .env("JJ_CONFIG", &jj_config)
         .env("PRE_COMMIT_HOME", repo.tmp.path().join("pre-commit-home"))
         .env("HOME", repo.tmp.path())
+        .env("TMPDIR", repo.scratch_tmp())
         .env("JJ_HOOKS_LOG", "info")
         .output()
         .unwrap();
@@ -184,6 +185,7 @@ email = "tests@jj-hooks.invalid"
         .env("JJ_CONFIG", &jj_config)
         .env("PRE_COMMIT_HOME", repo.tmp.path().join("pre-commit-home"))
         .env("HOME", repo.tmp.path())
+        .env("TMPDIR", repo.scratch_tmp())
         .env("JJ_HOOKS_LOG", "info")
         .output()
         .unwrap();
@@ -284,6 +286,7 @@ email = "tests@jj-hooks.invalid"
         .env("JJ_CONFIG", &jj_config)
         .env("PRE_COMMIT_HOME", repo.tmp.path().join("pre-commit-home"))
         .env("HOME", repo.tmp.path())
+        .env("TMPDIR", repo.scratch_tmp())
         .env("JJ_HOOKS_LOG", "info")
         .output()
         .unwrap();
@@ -386,6 +389,7 @@ email = "tests@jj-hooks.invalid"
         .env("JJ_CONFIG", &jj_config)
         .env("PRE_COMMIT_HOME", repo.tmp.path().join("pre-commit-home"))
         .env("HOME", repo.tmp.path())
+        .env("TMPDIR", repo.scratch_tmp())
         .env("JJ_HOOKS_LOG", "info")
         // uv writes to ~/.cache by default; scope to the tmpdir so
         // we don't pollute the host cache.

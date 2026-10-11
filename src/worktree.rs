@@ -23,10 +23,12 @@ pub const WORKTREE_PREFIX: &str = "jj-hooks-worktree-";
 const CREATION_GRACE: Duration = Duration::from_secs(3600);
 static SWEPT: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
 
-/// Resolve the on-disk root used for ephemeral hook worktrees.
+/// Resolve the on-disk root used for ephemeral hook worktrees, and reap
+/// worktrees leaked under the retired default roots.
 pub fn worktree_root(jj: &crate::jj::JjCli) -> PathBuf {
     let env = std::env::var_os("JJ_HOOKS_WORKTREE_ROOT");
     let config = jj.run(&["config", "get", "jj-hooks.worktree-root"]).ok();
+    let xdg_state = std::env::var_os("XDG_STATE_HOME");
     let xdg_cache = std::env::var_os("XDG_CACHE_HOME");
     let home = std::env::home_dir();
     let tmp = std::env::temp_dir();
@@ -51,7 +53,7 @@ pub fn worktree_root(jj: &crate::jj::JjCli) -> PathBuf {
     let root = root_from(
         env.as_deref(),
         config.as_deref(),
-        xdg_cache.as_deref(),
+        xdg_state.as_deref(),
         home.as_deref(),
         &tmp,
     );
@@ -61,13 +63,17 @@ pub fn worktree_root(jj: &crate::jj::JjCli) -> PathBuf {
             root.display()
         );
     }
+    sweep_retired(
+        &root,
+        &retired_roots(xdg_cache.as_deref(), home.as_deref(), &tmp),
+    );
     root
 }
 
 fn root_from(
     env: Option<&OsStr>,
     config: Option<&str>,
-    xdg_cache: Option<&OsStr>,
+    xdg_state: Option<&OsStr>,
     home: Option<&Path>,
     tmp: &Path,
 ) -> PathBuf {
@@ -81,13 +87,51 @@ fn root_from(
     {
         return path.to_path_buf();
     }
-    if let Some(path) = xdg_cache.map(Path::new).filter(|path| path.is_absolute()) {
+    if let Some(path) = xdg_state.map(Path::new).filter(|path| path.is_absolute()) {
         return path.join("jj-hooks").join("worktrees");
     }
     if let Some(home) = home {
-        return home.join(".cache").join("jj-hooks").join("worktrees");
+        return home
+            .join(".local")
+            .join("state")
+            .join("jj-hooks")
+            .join("worktrees");
     }
     tmp.join("jj-hooks-worktrees")
+}
+
+/// Default roots of earlier releases: `$XDG_CACHE_HOME` (else `~/.cache`) and
+/// the temp dir. The selected root's sweep never reaches worktrees leaked there.
+fn retired_roots(xdg_cache: Option<&OsStr>, home: Option<&Path>, tmp: &Path) -> Vec<PathBuf> {
+    let cache = xdg_cache
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|home| home.join(".cache")));
+    let mut roots = Vec::with_capacity(2);
+    if let Some(cache) = cache {
+        roots.push(cache.join("jj-hooks").join("worktrees"));
+    }
+    roots.push(tmp.join("jj-hooks-worktrees"));
+    roots
+}
+
+/// Sweep each existing retired root once per process, skipping `selected`:
+/// `Worktree::create` sweeps that one.
+fn sweep_retired(selected: &Path, retired: &[PathBuf]) -> usize {
+    let mut reaped = 0;
+    for root in retired {
+        if root == selected || !root.is_dir() {
+            continue;
+        }
+        let first = SWEPT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(root.clone());
+        if first {
+            reaped += sweep(root, CREATION_GRACE);
+        }
+    }
+    reaped
 }
 
 /// Reap dead-owner hook worktrees under `root`; returns the number reaped.
@@ -623,7 +667,7 @@ impl Drop for Worktree {
 
 #[cfg(test)]
 mod tests {
-    use super::{Worktree, lock_path, root_from, sweep};
+    use super::{Worktree, lock_path, retired_roots, root_from, sweep, sweep_retired};
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -977,12 +1021,103 @@ mod tests {
             Some(Path::new("/home/user")),
             Path::new("/tmp"),
         );
-        assert_eq!(root, PathBuf::from("/home/user/.cache/jj-hooks/worktrees"));
+        assert_eq!(
+            root,
+            PathBuf::from("/home/user/.local/state/jj-hooks/worktrees")
+        );
     }
 
     #[test]
     fn root_from_falls_back_to_temp_without_home() {
         let root = root_from(None, None, None, None, Path::new("/tmp"));
         assert_eq!(root, PathBuf::from("/tmp/jj-hooks-worktrees"));
+    }
+
+    #[test]
+    fn retired_roots_lists_old_cache_and_temp_defaults() {
+        assert_eq!(
+            retired_roots(
+                Some(OsStr::new("/xdg-cache")),
+                Some(Path::new("/home/user")),
+                Path::new("/tmp"),
+            ),
+            [
+                PathBuf::from("/xdg-cache/jj-hooks/worktrees"),
+                PathBuf::from("/tmp/jj-hooks-worktrees"),
+            ]
+        );
+        assert_eq!(
+            retired_roots(
+                Some(OsStr::new("relative")),
+                Some(Path::new("/home/user")),
+                Path::new("/tmp"),
+            ),
+            [
+                PathBuf::from("/home/user/.cache/jj-hooks/worktrees"),
+                PathBuf::from("/tmp/jj-hooks-worktrees"),
+            ]
+        );
+        assert_eq!(
+            retired_roots(None, None, Path::new("/tmp")),
+            [PathBuf::from("/tmp/jj-hooks-worktrees")]
+        );
+    }
+
+    #[test]
+    fn sweep_retired_reaps_leaked_worktree_under_old_root() {
+        let (temp, primary, git_dir) = setup_repo();
+        let old = temp.path().join("cache").join("jj-hooks").join("worktrees");
+        std::fs::create_dir_all(&old).unwrap();
+        let leaked = add_registered_worktree(&old, &git_dir, "leaked");
+        age(&leaked);
+        age(&lock_path(&leaked));
+        let selected = temp.path().join("state");
+        assert_eq!(listed_worktree_count(&primary), 2);
+
+        assert_eq!(sweep_retired(&selected, std::slice::from_ref(&old)), 1);
+        assert!(!leaked.exists());
+        assert!(!lock_path(&leaked).exists());
+        assert_eq!(listed_worktree_count(&primary), 1);
+        // Once per process: a second call leaves the root alone.
+        let again = add_registered_worktree(&old, &git_dir, "again");
+        age(&again);
+        age(&lock_path(&again));
+        assert_eq!(sweep_retired(&selected, &[old]), 0);
+        assert!(again.exists());
+    }
+
+    #[test]
+    fn sweep_retired_keeps_held_worktree_and_skips_selected_root() {
+        let (temp, _primary, git_dir) = setup_repo();
+        let old = temp.path().join("old");
+        let live = create_worktree(&old, &git_dir);
+        // `create` already swept `old`; reset so only `sweep_retired`'s lock check protects it.
+        super::SWEPT.lock().unwrap().remove(&old);
+        assert_eq!(
+            sweep_retired(&temp.path().join("state"), std::slice::from_ref(&old)),
+            0
+        );
+        assert!(live.path().exists());
+
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let dead = add_registered_worktree(&selected, &git_dir, "dead");
+        age(&dead);
+        age(&lock_path(&dead));
+        assert_eq!(sweep_retired(&selected, std::slice::from_ref(&selected)), 0);
+        assert!(dead.exists());
+    }
+
+    /// Backdate past `CREATION_GRACE` so the real-grace sweep may reap it.
+    fn age(path: &Path) {
+        let old = std::time::SystemTime::now() - super::CREATION_GRACE * 2;
+        std::fs::File::open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(old)
+                    .set_accessed(old),
+            )
+            .unwrap();
     }
 }
