@@ -86,7 +86,7 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
@@ -164,7 +164,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
@@ -245,7 +245,7 @@ jobs:
       #   - Permissions:   contents:write + metadata:read (least-privilege)
       #   - Installed on:  this repo + mattwilkinsonn/homebrew-tap
       #   - Bypass actor:  main-branch ruleset in each installed repo
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app-token
         with:
           app-id: ${{ vars.RELEASE_BOT_APP_ID }}
@@ -258,7 +258,7 @@ jobs:
             jj-hooks
             homebrew-tap
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # The self checkout carries .github/scripts/bump-formulae.py,
           # which rewrites the formula inside the tap checkout below.
@@ -272,7 +272,7 @@ jobs:
           # in the tap checkout Just Works without re-auth.
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # The formula now lives in the consolidated tap, not in this
           # repo, so the bump is a cross-repo commit.
@@ -405,7 +405,7 @@ jobs:
     timeout-minutes: 10
     if: needs.meta.outputs.prerelease == 'false'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
