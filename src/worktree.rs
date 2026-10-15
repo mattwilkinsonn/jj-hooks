@@ -258,6 +258,30 @@ pub(crate) fn sweep(root: &Path, grace: Duration) -> usize {
                         );
                         continue;
                     }
+                    // A deleted owner repo can never list or remove its worktree; the grace
+                    // window protects a create in flight. A relative path depends on cwd, so skip it.
+                    if git_dir.is_absolute() && git_dir.try_exists().is_ok_and(|exists| !exists) {
+                        if is_younger_than(&owner_path, &checkout, grace) {
+                            continue;
+                        }
+                        if checkout_metadata.is_some() {
+                            match fs::remove_dir_all(&checkout) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => {
+                                    warn!(
+                                        "failed to remove worktree {} of deleted repo: {error}",
+                                        checkout.display()
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        if unlink_owner(&owner_path) {
+                            reaped += 1;
+                        }
+                        continue;
+                    }
                     let registered = match registered_worktree(&git_dir, &checkout) {
                         Ok(registered) => registered,
                         Err(error) => {
@@ -667,7 +691,9 @@ impl Drop for Worktree {
 
 #[cfg(test)]
 mod tests {
-    use super::{Worktree, lock_path, retired_roots, root_from, sweep, sweep_retired};
+    use super::{
+        CREATION_GRACE, Worktree, lock_path, retired_roots, root_from, sweep, sweep_retired,
+    };
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -923,6 +949,53 @@ mod tests {
             std::fs::read_to_string(checkout.join("keep")).unwrap(),
             "foreign data"
         );
+        assert!(owner_path.exists());
+    }
+
+    #[test]
+    fn sweep_reaps_nonempty_checkout_whose_owner_git_dir_is_gone_after_grace() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp
+            .path()
+            .join(format!("{}orphan", super::WORKTREE_PREFIX));
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(checkout.join("src").join("file"), "leftover").unwrap();
+        let owner_path = lock_path(&checkout);
+        let gone = temp.path().join("deleted-repo").join(".git");
+        std::fs::write(
+            &owner_path,
+            format!("{}\n{}\n", std::process::id(), gone.display()),
+        )
+        .unwrap();
+
+        assert_eq!(sweep(temp.path(), CREATION_GRACE), 0);
+        assert!(checkout.join("src").join("file").exists());
+        assert!(owner_path.exists());
+
+        age(&owner_path);
+        assert_eq!(sweep(temp.path(), CREATION_GRACE), 1);
+        assert!(!checkout.exists());
+        assert!(!owner_path.exists());
+    }
+
+    #[test]
+    fn sweep_keeps_checkout_whose_relative_owner_git_dir_is_missing() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp
+            .path()
+            .join(format!("{}relative", super::WORKTREE_PREFIX));
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("keep"), "data").unwrap();
+        let owner_path = lock_path(&checkout);
+        std::fs::write(
+            &owner_path,
+            format!("{}\nno-such-relative-repo/.git\n", std::process::id()),
+        )
+        .unwrap();
+        age(&owner_path);
+
+        assert_eq!(sweep(temp.path(), CREATION_GRACE), 0);
+        assert!(checkout.join("keep").exists());
         assert!(owner_path.exists());
     }
 

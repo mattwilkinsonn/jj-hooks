@@ -4,6 +4,12 @@ All notable changes to jj-hooks are tracked here.
 
 ## [Unreleased]
 
+### Fixed
+
+- The sweep now reaps a worktree whose owner repository was deleted, once its
+  owner record is an hour old. Before, it logged `not a git repository` on every
+  run and kept the checkout forever.
+
 ## [0.6.0]
 
 Hook worktrees leave `~/.cache`.
