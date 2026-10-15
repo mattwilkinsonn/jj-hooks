@@ -59,7 +59,8 @@ locked for the worktree's lifetime. If a run dies without cleaning up
 `jj-hp` process in that root reaps every worktree whose lock is free and whose
 owner record proves it is a jj-hp worktree. An entry with an empty or missing
 owner record is kept for an hour after creation, and one with a malformed
-record is left alone.
+record is left alone. If the owner record names a git directory that no longer
+exists, the worktree is removed once the record is an hour old.
 
 Each `jj-hp` process also runs the same sweep once over the default roots of
 earlier releases (`$XDG_CACHE_HOME/jj-hooks/worktrees`,
