@@ -53,6 +53,21 @@ segment. The root is the first of:
 
 A relative override is ignored with a warning.
 
+### Concurrent gate runs
+
+`jj-hp` limits gate worktrees host-wide with file-locked slots. The slot
+directory is `$XDG_STATE_HOME/jj-hooks/slots` when `XDG_STATE_HOME` is absolute,
+or `~/.local/state/jj-hooks/slots`, falling back to the temp directory if the
+home directory is unavailable.
+
+Set `JJ_HOOKS_GATE_SLOTS` or jj config `jj-hooks.gate-slots` to a positive
+integer to change the limit. The environment variable takes precedence. The
+default is half the available CPU parallelism, rounded down and at least one.
+When all slots are busy, jj-hp prints one waiting line and polls every 500 ms.
+`JJ_HOOKS_GATE_SLOT_TIMEOUT` or `jj-hooks.gate-slot-timeout` sets the maximum
+wait in seconds (environment variable first; default 3600). If it expires,
+the gate does not run and the command fails.
+
 Each worktree has a sibling `<name>.lock` file that its `jj-hp` process holds
 locked for the worktree's lifetime. If a run dies without cleaning up
 (SIGKILL, a crash, power loss), the first worktree creation of the next

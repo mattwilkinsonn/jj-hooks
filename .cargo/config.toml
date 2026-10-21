@@ -1,0 +1,4 @@
+# Every cargo-run process (tests and `cargo run`) keeps gate slots and worktrees
+# under target/, so the suite never takes this host's shared gate slots.
+[env]
+XDG_STATE_HOME = { value = "target/test-state", relative = true, force = true }

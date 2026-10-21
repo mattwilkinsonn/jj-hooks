@@ -4,6 +4,11 @@ All notable changes to jj-hooks are tracked here.
 
 ## [Unreleased]
 
+### Added
+
+- Host-wide concurrent gate slots, configurable with `jj-hooks.gate-slots` or
+  `JJ_HOOKS_GATE_SLOTS`, with a bounded wait timeout.
+
 ### Fixed
 
 - The sweep now reaps a worktree whose owner repository was deleted, once its
