@@ -3,11 +3,11 @@
     "dev-shared": {
       "flake": false,
       "locked": {
-        "lastModified": 1791747617,
-        "narHash": "sha256-bjCwTwSyJQF+vwW+otVOYMQ6eFrN3pKnxkd161OvuKw=",
+        "lastModified": 1791851874,
+        "narHash": "sha256-EJtZ5q5WDPQ3TOD5EVaGalMlUftMx9GJu/T1UlJPxUg=",
         "owner": "mattwilkinsonn",
         "repo": "dev-shared",
-        "rev": "31448c220db45f50b3b801b3a3edcd82c3d187df",
+        "rev": "048a548e3e26e1d4314fe12e762a2481a013900a",
         "type": "github"
       },
       "original": {
@@ -19,11 +19,11 @@
     "devenv": {
       "locked": {
         "dir": "src/modules",
-        "lastModified": 1791785848,
-        "narHash": "sha256-8hOkttkgaVPCKwLHK5T2XbfBIj1k4G6xO1r4UVYm5aA=",
+        "lastModified": 1792410049,
+        "narHash": "sha256-J0P0p5vYf5O6I/oPaQpq6vw/mpe+Z6M0I0cdiJjqn/g=",
         "owner": "cachix",
         "repo": "devenv",
-        "rev": "a60ff7da8843686d06b4c6646846024d97138da8",
+        "rev": "08b97027bee4dbcd39412241d7f4b45f533e60d5",
         "type": "github"
       },
       "original": {
@@ -125,11 +125,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791795448,
-        "narHash": "sha256-12C5ef8a3endLXBvLOVR/jynM9EHGgP1t+y5uBorwx4=",
+        "lastModified": 1792395246,
+        "narHash": "sha256-SfVFE7TKuByeQRwhVbaVrvTV/lI41AYK9CYSfB+pIis=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "404b7a5537f0adc6e5c558a1b94612e683dec504",
+        "rev": "550547cefc67e01a6fd11a09e4096a3c844ca840",
         "type": "github"
       },
       "original": {
