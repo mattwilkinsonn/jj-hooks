@@ -8,6 +8,7 @@ pub mod cli;
 pub mod completions;
 pub mod error;
 pub mod gate_cache;
+pub mod gate_slots;
 pub mod hooks;
 pub mod init;
 pub(crate) mod interrupt;

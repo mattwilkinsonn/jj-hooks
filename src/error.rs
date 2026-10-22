@@ -15,6 +15,8 @@ pub enum JjHooksError {
         status: i32,
         captured: String,
     },
+    #[error("gate did not run: waited {waited_secs}s for one of {slots} host-wide gate slots")]
+    GateSlotTimeout { slots: usize, waited_secs: u64 },
 
     #[error("could not parse `jj git push --dry-run` output: {0}")]
     Parse(String),

@@ -798,6 +798,28 @@ fn run_once(
             cancelled: true,
         });
     }
+    let gate_slots = crate::gate_slots::configured(jj);
+    let acquired = crate::gate_slots::acquire(
+        &gate_slots.dir,
+        gate_slots.slots,
+        gate_slots.timeout,
+        |in_use| {
+            eprintln!(
+                "jj-hooks: waiting for a gate slot ({in_use} in use on this host; \
+                 JJ_HOOKS_GATE_SLOTS to change)"
+            );
+        },
+        || cancel.is_cancelled(),
+    )?;
+    // A sibling failed while this bookmark waited: skip it like the check above.
+    let Some(_slot) = acquired else {
+        return Ok(OnceOutcome {
+            success: true,
+            fixup_commit: None,
+            captured_output: None,
+            cancelled: true,
+        });
+    };
     let wt = Worktree::create(worktree_root, primary_git_dir, target_commit)?;
 
     // User-declared setup commands (e.g. `bun install`) run inside
