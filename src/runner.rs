@@ -361,15 +361,8 @@ pub(crate) fn resolve_runner_argv_for_cwd(
     // by the parent process's PATH during this lookup.
     let (effective_path, path_source) = crate::repo_env::effective_path(workspace_root);
 
-    // (3) uv-managed venv. Only for pre-commit / prek (lefthook and
-    // hk aren't Python tools). Requires both uv.lock in the workspace
-    // and `uv` itself on the effective child PATH.
-    // We pass `--project <workspace_root>` so uv resolves the venv
-    // relative to the user's actual workspace, not the ephemeral
-    // worktree we run hooks in. The worktree is a fresh git checkout
-    // and (typically) doesn't have `.venv` since `.venv` is gitignored
-    // — without --project, uv would either fail to find the runner
-    // or try to bootstrap a fresh env every push.
+    // (3) uv-managed venv. Find uv through the effective child PATH.
+    // Point it at workspace_root because the ephemeral worktree lacks `.venv`.
     if matches!(runner, Runner::PreCommit | Runner::Prek)
         && workspace_root.join("uv.lock").exists()
         && let Some(uv) = which_in_path("uv", effective_path.as_deref(), child_cwd)
