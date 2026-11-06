@@ -376,7 +376,8 @@ fn run_hk_validate(argv: &[String], cwd: &Path, workspace_root: &Path) -> bool {
             false
         }
         Err(e) => {
-            tracing::debug!("hk Pkl cache warm failed to spawn: {e}");
+            let error = crate::error::spawn_context(e, &argv[0], cwd);
+            tracing::debug!("hk Pkl cache warm failed to spawn: {error}");
             false
         }
     }
@@ -987,12 +988,13 @@ fn run_once(
             // installed only inside a venv (the issue #17 scenario) is
             // still preferable to the pre-commit on $PATH if the user
             // bothered to `prek install` the shim or set the config.
-            let prek_present = crate::runner::resolve_runner_argv(
+            let prek_present = crate::runner::resolve_runner_argv_for_cwd(
                 Runner::Prek,
                 jj,
                 workspace_root,
                 primary_git_dir,
                 stage,
+                wt.path(),
             )
             .is_ok();
             crate::runner::prefer_prek_when_available(r, prek_present)
@@ -1000,21 +1002,17 @@ fn run_once(
     };
     result.config = runner.config_path(wt.path());
 
-    // Pre-check that the runner binary is on PATH. Without this, the
-    // `Command::status()` call below surfaces a libc-level
-    // `posix_spawn: No such file or directory (os error 2)` with no
-    // indication of *which* binary couldn't be found. The common case
-    // for prek users is that prek is installed only inside a Python
-    // venv — jj-hooks runs in a clean ephemeral worktree and doesn't
-    // inherit the venv's PATH, so the user sees the cryptic error
-    // and has no idea it was prek that was missing.
-    //
-    // Resolution order is (1) explicit config, (2) the path baked into
-    // the `.git/hooks/<stage>` shim by `prek install` / `pre-commit
-    // install`, (3) `uv run` when uv.lock + uv are both present,
-    // (4) plain $PATH. See `resolve_runner_argv` for details.
-    let runner_argv =
-        crate::runner::resolve_runner_argv(runner, jj, workspace_root, primary_git_dir, stage)?;
+    // Resolve runner availability using the environment the child will see;
+    // missing runners report the name and effective PATH source instead of
+    // leaking a bare ENOENT from spawn.
+    let runner_argv = crate::runner::resolve_runner_argv_for_cwd(
+        runner,
+        jj,
+        workspace_root,
+        primary_git_dir,
+        stage,
+        wt.path(),
+    )?;
 
     // Warm hk's config cache for THIS worktree before the runner runs.
     // hk caches each worktree's resolved config separately, keyed by the
@@ -1242,13 +1240,15 @@ fn run_subprocess(
     cmd.env("JJ_HOOKS_WORKSPACE", workspace_root);
     match capture {
         None => {
-            let status = crate::interrupt::status(&mut cmd)?;
+            let status = crate::interrupt::status(&mut cmd)
+                .map_err(|error| crate::error::spawn_context(error, &argv[0], cwd))?;
             status
                 .code()
                 .ok_or_else(|| std::io::Error::other("hook runner terminated by signal").into())
         }
         Some(buf) => {
-            let output = crate::interrupt::output(&mut cmd)?;
+            let output = crate::interrupt::output(&mut cmd)
+                .map_err(|error| crate::error::spawn_context(error, &argv[0], cwd))?;
             // Tag the captured block with the argv so the user can
             // see which subprocess produced each chunk when N hook
             // backends are multiplexed.
@@ -1926,5 +1926,57 @@ mod tests {
             buf.contains(&format!("WS=[{}]", ws.path().display())),
             "captured: {buf:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_subprocess_finds_runner_in_seeded_repo_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let bin = tempfile::TempDir::new().unwrap();
+        let output = workspace.path().join("runner-output");
+        let runner = bin.path().join("jj-hooks-test-runner");
+        std::fs::write(
+            &runner,
+            format!("#!/bin/sh\nprintf patched > '{}'\n", output.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::repo_env::test_seed(
+            workspace.path(),
+            crate::repo_env::EnvPatch::Patch(std::collections::HashMap::from([(
+                "PATH".to_owned(),
+                Some(bin.path().display().to_string()),
+            )])),
+        );
+
+        run_subprocess(
+            &["jj-hooks-test-runner".to_owned()],
+            workspace.path(),
+            workspace.path(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "patched");
+    }
+
+    #[test]
+    fn run_subprocess_contextualizes_spawn_failure() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let missing = cwd.path().join("missing-runner").display().to_string();
+        let error = run_subprocess(&[missing.clone()], cwd.path(), workspace.path(), None)
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            JjHooksError::Spawn { argv0, cwd: spawn_cwd, source }
+                if argv0 == &missing
+                    && spawn_cwd == cwd.path()
+                    && source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(error.to_string().contains(&missing));
+        assert!(std::error::Error::source(&error).is_some());
     }
 }

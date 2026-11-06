@@ -10,6 +10,9 @@ All notable changes to jj-hooks are tracked here.
   `JJ_HOOKS_GATE_SLOTS`, with a bounded wait timeout.
 
 ### Fixed
+- Runner lookup now uses the same patched, inherited, or removed PATH as hook and
+  setup subprocesses, including for `uv`; missing runners report their name and
+  PATH source. Spawn errors now include argv0 and cwd while retaining the IO cause.
 
 - The sweep now reaps a worktree whose owner repository was deleted, once its
   owner record is an hour old. Before, it logged `not a git repository` on every

@@ -4,7 +4,7 @@
 //! the per-backend knowledge of "what args do I accept". pre-commit and
 //! prek share a CLI shape; hk has its own; lefthook needs a file list
 //! rather than ref bounds.
-
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::error::{JjHooksError, Result};
@@ -247,9 +247,19 @@ pub fn prek_on_path() -> bool {
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(bin);
+    let cwd = std::env::current_dir().ok()?;
+    which_in_path(bin, std::env::var_os("PATH").as_deref(), &cwd)
+}
+
+fn which_in_path(bin: &str, path: Option<&OsStr>, cwd: &Path) -> Option<PathBuf> {
+    let path = path?;
+    let cwd = std::path::absolute(cwd).ok()?;
+    for dir in std::env::split_paths(path) {
+        let candidate = if dir.is_absolute() {
+            dir.join(bin)
+        } else {
+            cwd.join(dir).join(bin)
+        };
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -257,47 +267,49 @@ fn which(bin: &str) -> Option<PathBuf> {
     None
 }
 
-/// Resolve the argv prefix to invoke a runner binary inside the
-/// ephemeral worktree. The returned `Vec<String>` is the program +
-/// any wrapper args that should be spliced in *in place of* the bare
-/// binary name (`runner.bin()`) when building hook commands.
+fn resolve_on_path(
+    bin: &str,
+    path: Option<&OsStr>,
+    cwd: &Path,
+    path_source: &'static str,
+) -> Result<Vec<String>> {
+    if let Some(path) = which_in_path(bin, path, cwd) {
+        return Ok(vec![path.to_string_lossy().into_owned()]);
+    }
+
+    Err(JjHooksError::RunnerNotFound {
+        bin: bin.to_owned(),
+        path_source,
+    })
+}
+/// Resolve a hook runner to an argv prefix.
 ///
-/// Resolution order (first hit wins):
+/// The prefix replaces the bare runner name when building the hook command.
+/// Resolution order is explicit config, an installed shim, a `uv`-managed
+/// environment for Python runners, then the patched or inherited child PATH.
+/// Relative PATH entries resolve against the child working directory.
 ///
-/// 1. **`jj-hooks.runner-bin.<runner>` config.** Explicit user override.
-///    Accepts a TOML string (single argv element, e.g. `".venv/bin/prek"`)
-///    or array (e.g. `["uv", "run", "prek"]`). Relative paths are resolved
-///    against `workspace_root`. Set in `~/.config/jj/config.toml` or the
-///    repo's `.jj/repo/config.toml`.
-/// 2. **Hook-shim path baked in by `prek install` / `pre-commit install`.**
-///    Parses `primary_git_dir/hooks/<stage>` looking for the canonical
-///    assignment each install script writes:
-///    - prek bakes `PREK="/.../venv/bin/prek"` and `exec`s it directly.
-///    - pre-commit bakes `INSTALL_PYTHON=/.../venv/bin/python` and runs
-///      `"$INSTALL_PYTHON" -mpre_commit …` — the interpreter is in the
-///      venv but the entry point is `python -m pre_commit`.
+/// # Errors
 ///
-///    Either way, the resolved binary matches what your existing
-///    `.git/hooks/<stage>` shim would have used, so jj-hp behaves
-///    identically to `git commit` / `git push` triggering the shim.
-/// 3. **uv-managed venv.** When `workspace_root/uv.lock` exists *and*
-///    `uv` is on `$PATH`, prepend `uv run --` to the bare runner
-///    invocation. uv resolves the project's venv automatically; the
-///    user doesn't have to activate anything. Only fires for pre-commit
-///    and prek (lefthook and hk aren't Python-installable).
-/// 4. **`$PATH` lookup.** The previous behaviour — bare program name,
-///    found via libc's `execvp` PATH walk.
-///
-/// Returns `Ok(argv)` for any hit; returns `Err(RunnerNotFound)` if all
-/// four layers come up empty. Errors from layer 1 (e.g. malformed config
-/// value) propagate so the user gets a clear message instead of silent
-/// fallthrough.
+/// Returns [`JjHooksError::RunnerNotFound`] when no layer finds the runner.
+/// The error includes the effective PATH source used for lookup.
 pub fn resolve_runner_argv(
     runner: Runner,
     jj: &JjCli,
     workspace_root: &Path,
     primary_git_dir: &Path,
     stage: Stage,
+) -> Result<Vec<String>> {
+    resolve_runner_argv_for_cwd(runner, jj, workspace_root, primary_git_dir, stage, jj.cwd())
+}
+
+pub(crate) fn resolve_runner_argv_for_cwd(
+    runner: Runner,
+    jj: &JjCli,
+    workspace_root: &Path,
+    primary_git_dir: &Path,
+    stage: Stage,
+    child_cwd: &Path,
 ) -> Result<Vec<String>> {
     // (1) Explicit config override.
     if let Some(argv) = read_runner_bin_config(jj, runner, workspace_root)? {
@@ -326,10 +338,14 @@ pub fn resolve_runner_argv(
         return Ok(argv);
     }
 
+    // Resolve PATH once from the same repo-env patch that will be applied
+    // to the child command. A patched or removed PATH must not be replaced
+    // by the parent process's PATH during this lookup.
+    let (effective_path, path_source) = crate::repo_env::effective_path(workspace_root);
+
     // (3) uv-managed venv. Only for pre-commit / prek (lefthook and
     // hk aren't Python tools). Requires both uv.lock in the workspace
-    // and `uv` itself on $PATH.
-    //
+    // and `uv` itself on the effective child PATH.
     // We pass `--project <workspace_root>` so uv resolves the venv
     // relative to the user's actual workspace, not the ephemeral
     // worktree we run hooks in. The worktree is a fresh git checkout
@@ -338,11 +354,11 @@ pub fn resolve_runner_argv(
     // or try to bootstrap a fresh env every push.
     if matches!(runner, Runner::PreCommit | Runner::Prek)
         && workspace_root.join("uv.lock").exists()
-        && which("uv").is_some()
+        && let Some(uv) = which_in_path("uv", effective_path.as_deref(), child_cwd)
     {
         tracing::debug!("runner {}: resolved via `uv run --project`", runner.bin());
         return Ok(vec![
-            "uv".into(),
+            uv.to_string_lossy().into_owned(),
             "run".into(),
             "--project".into(),
             workspace_root.to_string_lossy().into_owned(),
@@ -351,14 +367,10 @@ pub fn resolve_runner_argv(
         ]);
     }
 
-    // (4) Plain $PATH.
-    if which(runner.bin()).is_some() {
-        return Ok(vec![runner.bin().into()]);
-    }
 
-    Err(JjHooksError::RunnerNotFound {
-        bin: runner.bin().to_owned(),
-    })
+    // (4) The effective child PATH. Resolve the matching absolute path so
+    // exec does not search the parent PATH or resolve relative entries elsewhere.
+    resolve_on_path(runner.bin(), effective_path.as_deref(), child_cwd, path_source)
 }
 
 /// Read `jj-hooks.runner-bin.<runner>` from jj config and return it as an
@@ -525,6 +537,219 @@ fn read_shim_argv(primary_git_dir: &Path, stage: Stage, runner: Runner) -> Optio
 mod tests {
     use super::*;
 
+
+    fn write_executable(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn resolve_on_path_finds_runner_only_in_patched_path() {
+        let parent_bin = tempfile::TempDir::new().unwrap();
+        let patched_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), Runner::Hk.bin());
+        write_executable(patched_bin.path(), Runner::Lefthook.bin());
+
+        assert_eq!(
+            resolve_on_path(
+                Runner::Lefthook.bin(),
+                Some(patched_bin.path().as_os_str()),
+                patched_bin.path(),
+                "repo-env PATH patch",
+            )
+            .unwrap(),
+            vec![patched_bin.path().join(Runner::Lefthook.bin()).canonicalize().unwrap().display().to_string()]
+        );
+        let error = resolve_on_path(
+            Runner::Hk.bin(),
+            Some(patched_bin.path().as_os_str()),
+            patched_bin.path(),
+            "repo-env PATH patch",
+        )
+        .unwrap_err();
+        assert!(matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "repo-env PATH patch" } if bin == Runner::Hk.bin()));
+    }
+
+    #[test]
+    fn resolve_on_path_does_not_fall_back_when_path_is_removed() {
+        let parent_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), Runner::Hk.bin());
+        let error = resolve_on_path(
+            Runner::Hk.bin(),
+            None,
+            parent_bin.path(),
+            "PATH removed by repo-env patch",
+        )
+        .unwrap_err();
+        assert!(matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "PATH removed by repo-env patch" } if bin == Runner::Hk.bin()));
+    }
+
+    #[test]
+    fn resolve_on_path_uses_inherited_path_for_disabled_patch() {
+        let inherited_bin = tempfile::TempDir::new().unwrap();
+        let expected = write_executable(inherited_bin.path(), Runner::Hk.bin());
+        let result = resolve_on_path(
+            Runner::Hk.bin(),
+            Some(inherited_bin.path().as_os_str()),
+            inherited_bin.path(),
+            "inherited PATH",
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            vec![inherited_bin.path().join(Runner::Hk.bin()).canonicalize().unwrap().display().to_string()]
+        );
+        assert!(expected.is_file());
+    }
+
+    #[test]
+    fn uv_lookup_uses_the_effective_path() {
+        let parent_bin = tempfile::TempDir::new().unwrap();
+        let patched_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), "uv");
+        assert!(which_in_path(
+            "uv",
+            Some(patched_bin.path().as_os_str()),
+            patched_bin.path(),
+        )
+        .is_none());
+        let patched_uv = write_executable(patched_bin.path(), "uv");
+        assert_eq!(
+            which_in_path(
+                "uv",
+                Some(patched_bin.path().as_os_str()),
+                patched_bin.path(),
+            ),
+            Some(patched_uv.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_on_path_uses_seeded_repo_env_path_semantics() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let parent_bin = tempfile::TempDir::new().unwrap();
+        let patched_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), Runner::Hk.bin());
+        write_executable(patched_bin.path(), Runner::Lefthook.bin());
+
+        crate::repo_env::test_seed(
+            workspace.path(),
+            crate::repo_env::EnvPatch::Patch(std::collections::HashMap::from([(
+                "PATH".to_owned(),
+                Some(patched_bin.path().display().to_string()),
+            )])),
+        );
+        let (path, source) = crate::repo_env::effective_path_with_parent(
+            workspace.path(),
+            Some(parent_bin.path().as_os_str()),
+        );
+        assert_eq!(source, "repo-env PATH patch");
+        assert_eq!(
+            resolve_on_path(
+                Runner::Lefthook.bin(),
+                path.as_deref(),
+                workspace.path(),
+                source,
+            )
+            .unwrap(),
+            vec![patched_bin.path().join(Runner::Lefthook.bin()).canonicalize().unwrap().display().to_string()]
+        );
+        assert!(matches!(
+            resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source),
+            Err(JjHooksError::RunnerNotFound { ref bin, .. }) if bin == Runner::Hk.bin()
+        ));
+
+        crate::repo_env::test_seed(
+            workspace.path(),
+            crate::repo_env::EnvPatch::Patch(std::collections::HashMap::from([(
+                "PATH".to_owned(),
+                None,
+            )])),
+        );
+        let (path, source) = crate::repo_env::effective_path_with_parent(
+            workspace.path(),
+            Some(parent_bin.path().as_os_str()),
+        );
+        assert!(path.is_none());
+        assert!(matches!(
+            resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source),
+            Err(JjHooksError::RunnerNotFound { ref bin, path_source: "PATH removed by repo-env patch" }) if bin == Runner::Hk.bin()
+        ));
+
+        crate::repo_env::test_seed(workspace.path(), crate::repo_env::EnvPatch::Disabled);
+        let (path, source) = crate::repo_env::effective_path_with_parent(
+            workspace.path(),
+            Some(parent_bin.path().as_os_str()),
+        );
+        assert_eq!(source, "inherited PATH");
+        assert_eq!(
+            resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source).unwrap(),
+            vec![parent_bin.path().join(Runner::Hk.bin()).canonicalize().unwrap().display().to_string()]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn relative_path_entries_resolve_from_child_cwd() {
+        let parent_cwd = tempfile::TempDir::new().unwrap();
+        let child_cwd = tempfile::TempDir::new().unwrap();
+        let parent_bin = parent_cwd.path().join("bin");
+        let child_bin = child_cwd.path().join("bin");
+        std::fs::create_dir(&parent_bin).unwrap();
+        std::fs::create_dir(&child_bin).unwrap();
+        write_executable(&parent_bin, Runner::Hk.bin());
+        write_executable(&child_bin, Runner::Hk.bin());
+
+        let parent_found = which_in_path(
+            Runner::Hk.bin(),
+            Some(OsStr::new("bin")),
+            parent_cwd.path(),
+        );
+        let child_found = which_in_path(
+            Runner::Hk.bin(),
+            Some(OsStr::new("bin")),
+            child_cwd.path(),
+        );
+
+        assert_eq!(parent_found, Some(parent_bin.join(Runner::Hk.bin())));
+        assert_eq!(child_found, Some(child_bin.join(Runner::Hk.bin())));
+        assert_ne!(parent_found, child_found);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn empty_path_entry_resolves_from_child_cwd() {
+        let child_cwd = tempfile::TempDir::new().unwrap();
+        write_executable(child_cwd.path(), Runner::Hk.bin());
+
+        let found = which_in_path(Runner::Hk.bin(), Some(OsStr::new("")), child_cwd.path());
+        assert_eq!(found, Some(child_cwd.path().join(Runner::Hk.bin())));
+    }
+
+
+    #[test]
+    #[cfg(unix)]
+    fn earlier_non_executable_file_still_shadows_later_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cwd = tempfile::TempDir::new().unwrap();
+        let first = tempfile::TempDir::new().unwrap();
+        let second = tempfile::TempDir::new().unwrap();
+        let blocked = first.path().join(Runner::Hk.bin());
+        std::fs::write(&blocked, b"not executable").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_executable(second.path(), Runner::Hk.bin());
+
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+        let resolved = resolve_on_path(Runner::Hk.bin(), Some(&path), cwd.path(), "inherited PATH");
+        assert!(matches!(resolved, Err(JjHooksError::RunnerNotFound { .. })));
+    }
     // -- parse_runner_bin_value --------------------------------------------
 
     #[test]
