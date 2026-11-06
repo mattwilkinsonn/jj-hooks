@@ -130,6 +130,29 @@ use `cargo install --path .` to build from source. From v0.3.12 onward,
 pins resolve against the zireael monorepo and, once it goes private, fall back
 to a source build.
 
+### Via Nix flake
+
+```bash
+nix profile install github:mattwilkinsonn/jj-hooks#jj-hooks
+```
+
+This adds `jj-hooks` to the current Nix profile without replacing installations
+from other methods. To remove it, find its entry with `nix profile list` and
+remove that entry with `nix profile remove <index>`.
+
+Removing the package does not revert optional configuration from `jj-hp init`.
+Remove only the user-level jj settings you chose to add; remove jjui actions and
+bindings from the jjui config manually. `jj new <exact-hash>` changes the jj
+workspace revision only; it does not remove a profile package or revert user
+configuration.
+
+### Run with Nix without installing
+
+```bash
+nix run github:mattwilkinsonn/jj-hooks#jj-hp -- --help
+nix run github:mattwilkinsonn/jj-hooks#jj-hooks -- --help
+```
+
 ### Via Homebrew tap
 
 ```bash
