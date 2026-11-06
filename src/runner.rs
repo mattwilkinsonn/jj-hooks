@@ -260,11 +260,29 @@ fn which_in_path(bin: &str, path: Option<&OsStr>, cwd: &Path) -> Option<PathBuf>
         } else {
             cwd.join(dir).join(bin)
         };
-        if candidate.is_file() {
+        if is_executable(&candidate) {
             return Some(candidate);
         }
     }
     None
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn resolve_on_path(
@@ -367,10 +385,14 @@ pub(crate) fn resolve_runner_argv_for_cwd(
         ]);
     }
 
-
     // (4) The effective child PATH. Resolve the matching absolute path so
     // exec does not search the parent PATH or resolve relative entries elsewhere.
-    resolve_on_path(runner.bin(), effective_path.as_deref(), child_cwd, path_source)
+    resolve_on_path(
+        runner.bin(),
+        effective_path.as_deref(),
+        child_cwd,
+        path_source,
+    )
 }
 
 /// Read `jj-hooks.runner-bin.<runner>` from jj config and return it as an
@@ -537,7 +559,6 @@ fn read_shim_argv(primary_git_dir: &Path, stage: Stage, runner: Runner) -> Optio
 mod tests {
     use super::*;
 
-
     fn write_executable(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
@@ -564,7 +585,15 @@ mod tests {
                 "repo-env PATH patch",
             )
             .unwrap(),
-            vec![patched_bin.path().join(Runner::Lefthook.bin()).canonicalize().unwrap().display().to_string()]
+            vec![
+                patched_bin
+                    .path()
+                    .join(Runner::Lefthook.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
         );
         let error = resolve_on_path(
             Runner::Hk.bin(),
@@ -573,7 +602,9 @@ mod tests {
             "repo-env PATH patch",
         )
         .unwrap_err();
-        assert!(matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "repo-env PATH patch" } if bin == Runner::Hk.bin()));
+        assert!(
+            matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "repo-env PATH patch" } if bin == Runner::Hk.bin())
+        );
     }
 
     #[test]
@@ -587,7 +618,9 @@ mod tests {
             "PATH removed by repo-env patch",
         )
         .unwrap_err();
-        assert!(matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "PATH removed by repo-env patch" } if bin == Runner::Hk.bin()));
+        assert!(
+            matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "PATH removed by repo-env patch" } if bin == Runner::Hk.bin())
+        );
     }
 
     #[test]
@@ -603,7 +636,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             result,
-            vec![inherited_bin.path().join(Runner::Hk.bin()).canonicalize().unwrap().display().to_string()]
+            vec![
+                inherited_bin
+                    .path()
+                    .join(Runner::Hk.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
         );
         assert!(expected.is_file());
     }
@@ -613,12 +654,14 @@ mod tests {
         let parent_bin = tempfile::TempDir::new().unwrap();
         let patched_bin = tempfile::TempDir::new().unwrap();
         write_executable(parent_bin.path(), "uv");
-        assert!(which_in_path(
-            "uv",
-            Some(patched_bin.path().as_os_str()),
-            patched_bin.path(),
-        )
-        .is_none());
+        assert!(
+            which_in_path(
+                "uv",
+                Some(patched_bin.path().as_os_str()),
+                patched_bin.path(),
+            )
+            .is_none()
+        );
         let patched_uv = write_executable(patched_bin.path(), "uv");
         assert_eq!(
             which_in_path(
@@ -658,7 +701,15 @@ mod tests {
                 source,
             )
             .unwrap(),
-            vec![patched_bin.path().join(Runner::Lefthook.bin()).canonicalize().unwrap().display().to_string()]
+            vec![
+                patched_bin
+                    .path()
+                    .join(Runner::Lefthook.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
         );
         assert!(matches!(
             resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source),
@@ -690,7 +741,15 @@ mod tests {
         assert_eq!(source, "inherited PATH");
         assert_eq!(
             resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source).unwrap(),
-            vec![parent_bin.path().join(Runner::Hk.bin()).canonicalize().unwrap().display().to_string()]
+            vec![
+                parent_bin
+                    .path()
+                    .join(Runner::Hk.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
         );
     }
 
@@ -706,16 +765,10 @@ mod tests {
         write_executable(&parent_bin, Runner::Hk.bin());
         write_executable(&child_bin, Runner::Hk.bin());
 
-        let parent_found = which_in_path(
-            Runner::Hk.bin(),
-            Some(OsStr::new("bin")),
-            parent_cwd.path(),
-        );
-        let child_found = which_in_path(
-            Runner::Hk.bin(),
-            Some(OsStr::new("bin")),
-            child_cwd.path(),
-        );
+        let parent_found =
+            which_in_path(Runner::Hk.bin(), Some(OsStr::new("bin")), parent_cwd.path());
+        let child_found =
+            which_in_path(Runner::Hk.bin(), Some(OsStr::new("bin")), child_cwd.path());
 
         assert_eq!(parent_found, Some(parent_bin.join(Runner::Hk.bin())));
         assert_eq!(child_found, Some(child_bin.join(Runner::Hk.bin())));
@@ -732,10 +785,9 @@ mod tests {
         assert_eq!(found, Some(child_cwd.path().join(Runner::Hk.bin())));
     }
 
-
     #[test]
     #[cfg(unix)]
-    fn earlier_non_executable_file_still_shadows_later_binary() {
+    fn earlier_non_executable_file_is_skipped_for_later_binary() {
         use std::os::unix::fs::PermissionsExt;
 
         let cwd = tempfile::TempDir::new().unwrap();
@@ -744,11 +796,12 @@ mod tests {
         let blocked = first.path().join(Runner::Hk.bin());
         std::fs::write(&blocked, b"not executable").unwrap();
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644)).unwrap();
-        write_executable(second.path(), Runner::Hk.bin());
+        let expected = write_executable(second.path(), Runner::Hk.bin());
 
         let path = std::env::join_paths([first.path(), second.path()]).unwrap();
-        let resolved = resolve_on_path(Runner::Hk.bin(), Some(&path), cwd.path(), "inherited PATH");
-        assert!(matches!(resolved, Err(JjHooksError::RunnerNotFound { .. })));
+        let resolved = resolve_on_path(Runner::Hk.bin(), Some(&path), cwd.path(), "inherited PATH")
+            .unwrap();
+        assert_eq!(resolved, vec![expected.display().to_string()]);
     }
     // -- parse_runner_bin_value --------------------------------------------
 

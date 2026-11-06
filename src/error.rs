@@ -91,7 +91,9 @@ mod tests {
         assert!(error.to_string().contains("missing-hook"));
         assert!(error.to_string().contains("/tmp/ephemeral-worktree"));
         assert_eq!(
-            std::error::Error::source(&error).map(ToString::to_string).as_deref(),
+            std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .as_deref(),
             Some("no executable")
         );
     }

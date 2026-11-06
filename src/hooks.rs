@@ -1966,7 +1966,7 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
         let missing = cwd.path().join("missing-runner").display().to_string();
-        let error = run_subprocess(&[missing.clone()], cwd.path(), workspace.path(), None)
+        let error = run_subprocess(std::slice::from_ref(&missing), cwd.path(), workspace.path(), None)
             .unwrap_err();
 
         assert!(matches!(

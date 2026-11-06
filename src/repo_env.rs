@@ -186,9 +186,7 @@ pub(crate) fn effective_path_with_parent(
             Some(None) => (None, "PATH removed by repo-env patch"),
             None => (parent_path.map(OsString::from), "inherited PATH"),
         },
-        Some(EnvPatch::Disabled) | None => {
-            (parent_path.map(OsString::from), "inherited PATH")
-        }
+        Some(EnvPatch::Disabled) | None => (parent_path.map(OsString::from), "inherited PATH"),
     }
 }
 
@@ -666,7 +664,10 @@ mod tests {
 
         test_seed(
             workspace.path(),
-            EnvPatch::Patch(HashMap::from([("MARKER".to_owned(), Some("set".to_owned()))])),
+            EnvPatch::Patch(HashMap::from([(
+                "MARKER".to_owned(),
+                Some("set".to_owned()),
+            )])),
         );
         assert_eq!(
             effective_path_with_parent(workspace.path(), Some(parent)),
