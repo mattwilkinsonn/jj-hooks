@@ -196,8 +196,6 @@ pub(crate) fn effective_path_with_parent(
     effective_path_from(workspace_root, || parent_path.map(OsString::from))
 }
 
-
-
 /// Strip the git repo-location env family (`GIT_DIR`, `GIT_INDEX_FILE`,
 /// `GIT_CONFIG_PARAMETERS`, and the rest of `git rev-parse --local-env-vars`)
 /// from a hook/setup `cmd`. Run unconditionally on every spawn jj-hp makes

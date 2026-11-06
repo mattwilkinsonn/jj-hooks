@@ -2023,7 +2023,11 @@ mod tests {
             .current_dir(workspace.path())
             .output()
             .unwrap();
-        assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
         for runner in [Runner::Hk, Runner::Prek] {
             let key = format!("jj-hooks.runner-bin.{}", runner.bin());
             let configured = Command::new("jj")
@@ -2061,8 +2065,8 @@ mod tests {
         std::fs::remove_file(&executable).unwrap();
 
         let mut captured = String::new();
-        let error = run_subprocess(&argv, child.path(), workspace.path(), Some(&mut captured))
-            .unwrap_err();
+        let error =
+            run_subprocess(&argv, child.path(), workspace.path(), Some(&mut captured)).unwrap_err();
         assert!(matches!(
             &error,
             JjHooksError::Spawn { argv0, cwd: spawn_cwd, source }

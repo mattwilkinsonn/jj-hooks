@@ -613,8 +613,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     #[cfg(unix)]
     fn resolver_spawns_patched_only_runner_and_rejects_removed_path() {
@@ -629,10 +627,16 @@ mod tests {
         let jj = init_test_workspace(&workspace);
         let parent_marker = tmp.path().join("parent-marker");
         let patched_marker = tmp.path().join("patched-marker");
-        for (bin, marker) in [(&parent_bin, &parent_marker), (&patched_bin, &patched_marker)] {
+        for (bin, marker) in [
+            (&parent_bin, &parent_marker),
+            (&patched_bin, &patched_marker),
+        ] {
             let path = bin.join(Runner::Hk.bin());
-            std::fs::write(&path, format!("#!/bin/sh\nprintf ok > '{}'\n", marker.display()))
-                .unwrap();
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf ok > '{}'\n", marker.display()),
+            )
+            .unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -679,16 +683,19 @@ mod tests {
         let jj = init_test_workspace(&workspace);
         std::fs::create_dir_all(child.join("bin")).unwrap();
         let marker = tmp.path().join("runner-marker");
-        let runner = child.join("bin").join(Runner::Hk.bin());
-        std::fs::write(
-            &runner,
-            format!("#!/bin/sh\nprintf child > '{}'\n", marker.display()),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin_runner = child.join("bin").join(Runner::Hk.bin());
+        let empty_runner = child.join(Runner::Hk.bin());
+        for (runner, result) in [(&bin_runner, "bin"), (&empty_runner, "empty")] {
+            std::fs::write(
+                runner,
+                format!("#!/bin/sh\nprintf '%s' '{}' > '{}'\n", result, marker.display()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
-        for path in ["bin", ""] {
+        for (path, expected) in [("bin", "bin"), ("", "empty")] {
             seed_path(&workspace, Some(path.to_owned()));
             let argv = resolve_runner_argv_for_cwd(
                 Runner::Hk,
@@ -700,7 +707,7 @@ mod tests {
             )
             .unwrap();
             run_resolved(&argv, &child, &workspace, &marker);
-            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "child");
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), expected);
             std::fs::remove_file(&marker).unwrap();
         }
     }
@@ -716,15 +723,22 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&parent_bin).unwrap();
         std::fs::create_dir_all(&patched_bin).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("uv.lock"), "version = 1\n").unwrap();
         let jj = init_test_workspace(&workspace);
         let parent_marker = tmp.path().join("parent-uv");
         let patched_marker = tmp.path().join("patched-uv");
-        for (dir, marker) in [(&parent_bin, &parent_marker), (&patched_bin, &patched_marker)] {
+        for (dir, marker) in [
+            (&parent_bin, &parent_marker),
+            (&patched_bin, &patched_marker),
+        ] {
             let uv = dir.join("uv");
             std::fs::write(
                 &uv,
-                format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", marker.display()),
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    marker.display()
+                ),
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt;
@@ -744,7 +758,13 @@ mod tests {
         assert_eq!(argv[0], patched_bin.join("uv").display().to_string());
         assert_eq!(
             &argv[1..],
-            &["run", "--project", workspace.to_str().unwrap(), "--", "prek"]
+            &[
+                "run",
+                "--project",
+                workspace.to_str().unwrap(),
+                "--",
+                "prek"
+            ]
         );
         run_resolved(&argv, &child, &workspace, &patched_marker);
         assert_eq!(
@@ -753,7 +773,6 @@ mod tests {
         );
         assert!(!parent_marker.exists());
     }
-
 
     #[test]
     fn resolve_on_path_finds_runner_only_in_patched_path() {
