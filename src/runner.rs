@@ -356,13 +356,10 @@ pub(crate) fn resolve_runner_argv_for_cwd(
         return Ok(argv);
     }
 
-    // Resolve PATH once from the same repo-env patch that will be applied
-    // to the child command. A patched or removed PATH must not be replaced
-    // by the parent process's PATH during this lookup.
+    // Resolve from the same environment patch that the child command receives.
     let (effective_path, path_source) = crate::repo_env::effective_path(workspace_root);
-
-    // (3) uv-managed venv. Find uv through the effective child PATH.
-    // Point it at workspace_root because the ephemeral worktree lacks `.venv`.
+    // Use the child's effective PATH for lookup. The project flag must point
+    // at workspace_root because the ephemeral worktree has no `.venv`.
     if matches!(runner, Runner::PreCommit | Runner::Prek)
         && workspace_root.join("uv.lock").exists()
         && let Some(uv) = which_in_path("uv", effective_path.as_deref(), child_cwd)
@@ -562,6 +559,201 @@ mod tests {
         }
         path
     }
+
+    fn init_test_workspace(root: &Path) -> JjCli {
+        std::fs::create_dir_all(root).unwrap();
+        let output = std::process::Command::new("jj")
+            .args(["git", "init", "--colocate"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for runner in [Runner::Hk, Runner::Prek] {
+            let key = format!("jj-hooks.runner-bin.{}", runner.bin());
+            let output = std::process::Command::new("jj")
+                .args(["config", "set", "--repo", &key, ""])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        JjCli::new(root)
+    }
+
+    fn seed_path(root: &Path, path: Option<String>) {
+        crate::repo_env::test_seed(
+            root,
+            crate::repo_env::EnvPatch::Patch(std::collections::HashMap::from([(
+                "PATH".to_owned(),
+                path,
+            )])),
+        );
+    }
+
+    fn run_resolved(argv: &[String], cwd: &Path, workspace_root: &Path, marker: &Path) {
+        let mut command = std::process::Command::new(&argv[0]);
+        command
+            .args(&argv[1..])
+            .current_dir(cwd)
+            .env("JJ_HOOKS_TEST_MARKER", marker);
+        crate::repo_env::apply_repo_env(&mut command, workspace_root);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+
+
+    #[test]
+    #[cfg(unix)]
+    fn resolver_spawns_patched_only_runner_and_rejects_removed_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let child = tmp.path().join("child");
+        let parent_bin = tmp.path().join("parent-bin");
+        let patched_bin = tmp.path().join("patched-bin");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&parent_bin).unwrap();
+        std::fs::create_dir_all(&patched_bin).unwrap();
+        let jj = init_test_workspace(&workspace);
+        let parent_marker = tmp.path().join("parent-marker");
+        let patched_marker = tmp.path().join("patched-marker");
+        for (bin, marker) in [(&parent_bin, &parent_marker), (&patched_bin, &patched_marker)] {
+            let path = bin.join(Runner::Hk.bin());
+            std::fs::write(&path, format!("#!/bin/sh\nprintf ok > '{}'\n", marker.display()))
+                .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        seed_path(&workspace, Some(patched_bin.display().to_string()));
+        let argv = resolve_runner_argv_for_cwd(
+            Runner::Hk,
+            &jj,
+            &workspace,
+            Path::new("/unused/git"),
+            Stage::PrePush,
+            &child,
+        )
+        .unwrap();
+        run_resolved(&argv, &child, &workspace, &patched_marker);
+        assert!(patched_marker.exists());
+        assert!(!parent_marker.exists());
+
+        seed_path(&workspace, None);
+        let error = resolve_runner_argv_for_cwd(
+            Runner::Hk,
+            &jj,
+            &workspace,
+            Path::new("/unused/git"),
+            Stage::PrePush,
+            &child,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            JjHooksError::RunnerNotFound {
+                bin,
+                path_source: "PATH removed by repo-env patch"
+            } if bin == Runner::Hk.bin()
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolver_spawns_relative_and_empty_path_entries_from_child_cwd() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let child = tmp.path().join("child");
+        let jj = init_test_workspace(&workspace);
+        std::fs::create_dir_all(child.join("bin")).unwrap();
+        let marker = tmp.path().join("runner-marker");
+        let runner = child.join("bin").join(Runner::Hk.bin());
+        std::fs::write(
+            &runner,
+            format!("#!/bin/sh\nprintf child > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        for path in ["bin", ""] {
+            seed_path(&workspace, Some(path.to_owned()));
+            let argv = resolve_runner_argv_for_cwd(
+                Runner::Hk,
+                &jj,
+                &workspace,
+                Path::new("/unused/git"),
+                Stage::PrePush,
+                &child,
+            )
+            .unwrap();
+            run_resolved(&argv, &child, &workspace, &marker);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "child");
+            std::fs::remove_file(&marker).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolver_uses_patched_path_for_uv_and_preserves_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let child = tmp.path().join("child");
+        let parent_bin = tmp.path().join("parent-bin");
+        let patched_bin = tmp.path().join("patched-bin");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&parent_bin).unwrap();
+        std::fs::create_dir_all(&patched_bin).unwrap();
+        std::fs::write(workspace.join("uv.lock"), "version = 1\n").unwrap();
+        let jj = init_test_workspace(&workspace);
+        let parent_marker = tmp.path().join("parent-uv");
+        let patched_marker = tmp.path().join("patched-uv");
+        for (dir, marker) in [(&parent_bin, &parent_marker), (&patched_bin, &patched_marker)] {
+            let uv = dir.join("uv");
+            std::fs::write(
+                &uv,
+                format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", marker.display()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        seed_path(&workspace, Some(patched_bin.display().to_string()));
+        let argv = resolve_runner_argv_for_cwd(
+            Runner::Prek,
+            &jj,
+            &workspace,
+            Path::new("/unused/git"),
+            Stage::PrePush,
+            &child,
+        )
+        .unwrap();
+        assert_eq!(argv[0], patched_bin.join("uv").display().to_string());
+        assert_eq!(
+            &argv[1..],
+            &["run", "--project", workspace.to_str().unwrap(), "--", "prek"]
+        );
+        run_resolved(&argv, &child, &workspace, &patched_marker);
+        assert_eq!(
+            std::fs::read_to_string(patched_marker).unwrap(),
+            format!("run\n--project\n{}\n--\nprek\n", workspace.display())
+        );
+        assert!(!parent_marker.exists());
+    }
+
 
     #[test]
     fn resolve_on_path_finds_runner_only_in_patched_path() {

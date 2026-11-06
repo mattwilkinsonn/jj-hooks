@@ -164,27 +164,12 @@ pub(crate) fn apply_repo_env_with_policy(
 /// removal is distinct from an inherited PATH: it must not fall back to the
 /// parent's executable search path.
 pub(crate) fn effective_path(workspace_root: &Path) -> (Option<OsString>, &'static str) {
-    let key = cache_key(workspace_root);
-    let patch = {
-        let guard = cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.get(&key).map(Arc::clone)
-    };
-
-    match patch.as_deref() {
-        Some(EnvPatch::Patch(map)) => match map.get("PATH") {
-            Some(Some(path)) => (Some(OsString::from(path)), "repo-env PATH patch"),
-            Some(None) => (None, "PATH removed by repo-env patch"),
-            None => (std::env::var_os("PATH"), "inherited PATH"),
-        },
-        Some(EnvPatch::Disabled) | None => (std::env::var_os("PATH"), "inherited PATH"),
-    }
+    effective_path_from(workspace_root, || std::env::var_os("PATH"))
 }
 
-pub(crate) fn effective_path_with_parent(
+fn effective_path_from(
     workspace_root: &Path,
-    parent_path: Option<&std::ffi::OsStr>,
+    inherited_path: impl FnOnce() -> Option<OsString>,
 ) -> (Option<OsString>, &'static str) {
     let key = cache_key(workspace_root);
     let patch = {
@@ -193,16 +178,25 @@ pub(crate) fn effective_path_with_parent(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.get(&key).map(Arc::clone)
     };
-
     match patch.as_deref() {
         Some(EnvPatch::Patch(map)) => match map.get("PATH") {
             Some(Some(path)) => (Some(path.into()), "repo-env PATH patch"),
             Some(None) => (None, "PATH removed by repo-env patch"),
-            None => (parent_path.map(OsString::from), "inherited PATH"),
+            None => (inherited_path(), "inherited PATH"),
         },
-        Some(EnvPatch::Disabled) | None => (parent_path.map(OsString::from), "inherited PATH"),
+        Some(EnvPatch::Disabled) | None => (inherited_path(), "inherited PATH"),
     }
 }
+
+#[cfg(test)]
+pub(crate) fn effective_path_with_parent(
+    workspace_root: &Path,
+    parent_path: Option<&std::ffi::OsStr>,
+) -> (Option<OsString>, &'static str) {
+    effective_path_from(workspace_root, || parent_path.map(OsString::from))
+}
+
+
 
 /// Strip the git repo-location env family (`GIT_DIR`, `GIT_INDEX_FILE`,
 /// `GIT_CONFIG_PARAMETERS`, and the rest of `git rev-parse --local-env-vars`)

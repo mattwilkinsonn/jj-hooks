@@ -1984,4 +1984,92 @@ mod tests {
         assert!(error.to_string().contains(&missing));
         assert!(std::error::Error::source(&error).is_some());
     }
+
+    #[test]
+    fn run_subprocess_captures_spawn_failure_context() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let missing = cwd.path().join("missing-runner").display().to_string();
+        let mut captured = String::new();
+        let error = run_subprocess(
+            std::slice::from_ref(&missing),
+            cwd.path(),
+            workspace.path(),
+            Some(&mut captured),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            JjHooksError::Spawn { argv0, cwd: spawn_cwd, source }
+                if argv0 == &missing
+                    && spawn_cwd == cwd.path()
+                    && source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(error.to_string().contains(&missing));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolved_runner_captures_spawn_failure_context() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let child = tempfile::TempDir::new().unwrap();
+        let bin = tempfile::TempDir::new().unwrap();
+        let init = Command::new("jj")
+            .args(["git", "init", "--colocate"])
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+        for runner in [Runner::Hk, Runner::Prek] {
+            let key = format!("jj-hooks.runner-bin.{}", runner.bin());
+            let configured = Command::new("jj")
+                .args(["config", "set", "--repo", &key, ""])
+                .current_dir(workspace.path())
+                .output()
+                .unwrap();
+            assert!(
+                configured.status.success(),
+                "{}",
+                String::from_utf8_lossy(&configured.stderr)
+            );
+        }
+
+        let executable = bin.path().join(Runner::Hk.bin());
+        std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::repo_env::test_seed(
+            workspace.path(),
+            crate::repo_env::EnvPatch::Patch(std::collections::HashMap::from([(
+                "PATH".to_owned(),
+                Some(bin.path().display().to_string()),
+            )])),
+        );
+        let jj = JjCli::new(workspace.path());
+        let argv = crate::runner::resolve_runner_argv_for_cwd(
+            Runner::Hk,
+            &jj,
+            workspace.path(),
+            Path::new("/unused/git"),
+            Stage::PrePush,
+            child.path(),
+        )
+        .unwrap();
+        std::fs::remove_file(&executable).unwrap();
+
+        let mut captured = String::new();
+        let error = run_subprocess(&argv, child.path(), workspace.path(), Some(&mut captured))
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            JjHooksError::Spawn { argv0, cwd: spawn_cwd, source }
+                if argv0 == &executable.display().to_string()
+                    && spawn_cwd == child.path()
+                    && source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+    }
 }
