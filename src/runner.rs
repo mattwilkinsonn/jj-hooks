@@ -799,8 +799,8 @@ mod tests {
         let expected = write_executable(second.path(), Runner::Hk.bin());
 
         let path = std::env::join_paths([first.path(), second.path()]).unwrap();
-        let resolved = resolve_on_path(Runner::Hk.bin(), Some(&path), cwd.path(), "inherited PATH")
-            .unwrap();
+        let resolved =
+            resolve_on_path(Runner::Hk.bin(), Some(&path), cwd.path(), "inherited PATH").unwrap();
         assert_eq!(resolved, vec![expected.display().to_string()]);
     }
     // -- parse_runner_bin_value --------------------------------------------
