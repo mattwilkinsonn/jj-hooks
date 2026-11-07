@@ -300,6 +300,20 @@ fn resolve_on_path(
         path_source,
     })
 }
+
+fn validate_path_entries_utf8(path: Option<&OsStr>) -> Result<()> {
+    if let Some(path) = path {
+        for entry in std::env::split_paths(path) {
+            if entry.to_str().is_none() {
+                return Err(JjHooksError::Parse(format!(
+                    "PATH entry `{}` is not valid UTF-8",
+                    entry.to_string_lossy()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 /// Resolve a hook runner to an argv prefix.
 ///
 /// The prefix replaces the bare runner name when building the hook command.
@@ -615,6 +629,52 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn resolve_runner_rejects_non_utf8_path_entry_without_spawning() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("runner-spawned");
+        let invalid_entry = tmp.path().join(OsStr::from_bytes(b"runner-\xff"));
+        let lossy_entry = PathBuf::from(invalid_entry.to_string_lossy().into_owned());
+        std::fs::create_dir(&invalid_entry).unwrap();
+        std::fs::create_dir(&lossy_entry).unwrap();
+
+        let checked_runner = write_executable(&invalid_entry, Runner::Hk.bin());
+        let resolved_runner = lossy_entry.join(Runner::Hk.bin());
+        std::fs::write(
+            &resolved_runner,
+            format!("#!/bin/sh\nprintf spawned > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&resolved_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(checked_runner.is_file());
+
+        let path = std::env::join_paths([invalid_entry.as_os_str()]).unwrap();
+        let result = resolve_on_path(
+            Runner::Hk.bin(),
+            Some(&path),
+            tmp.path(),
+            "repo-env PATH patch",
+        );
+        if let Ok(argv) = &result {
+            let output = std::process::Command::new(&argv[0]).output().unwrap();
+            assert!(output.status.success());
+        }
+
+        assert!(!marker.exists(), "resolved runner unexpectedly spawned");
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            JjHooksError::Parse(message)
+                if message.contains("PATH entry")
+                    && message.contains(&invalid_entry.to_string_lossy().to_string())
+                    && message.contains("not valid UTF-8")
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn resolver_spawns_patched_only_runner_and_rejects_removed_path() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("workspace");
@@ -688,7 +748,11 @@ mod tests {
         for (runner, result) in [(&bin_runner, "bin"), (&empty_runner, "empty")] {
             std::fs::write(
                 runner,
-                format!("#!/bin/sh\nprintf '%s' '{}' > '{}'\n", result, marker.display()),
+                format!(
+                    "#!/bin/sh\nprintf '%s' '{}' > '{}'\n",
+                    result,
+                    marker.display()
+                ),
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt;
