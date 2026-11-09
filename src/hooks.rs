@@ -166,6 +166,7 @@ pub fn run_for_update(
         update,
         opts,
         &mut result,
+        false,
     )
 }
 
@@ -180,6 +181,7 @@ pub fn run_for_update_with_result(
     update: &BookmarkUpdate,
     opts: RunOpts,
     result: &mut RunResult,
+    preserve_gate_env: bool,
 ) -> Result<HookOutcome> {
     let worktree_root = crate::worktree::worktree_root(jj);
     // Compute the repo's devenv/direnv env ONCE, eagerly, before any
@@ -206,6 +208,7 @@ pub fn run_for_update_with_result(
         &Cancel::never(),
         None,
         result,
+        preserve_gate_env,
     );
     crate::interrupt::check()?;
     outcome
@@ -235,6 +238,7 @@ fn run_for_update_with_cancel(
     cancel: &Cancel,
     warm: Option<&PklWarmCache>,
     result: &mut RunResult,
+    preserve_gate_env: bool,
 ) -> Result<HookOutcome> {
     let Some(new_commit) = update.new_commit.as_ref() else {
         // Pure delete — nothing to check.
@@ -266,6 +270,7 @@ fn run_for_update_with_cancel(
         result,
         &diff_base,
         &setup_steps,
+        preserve_gate_env,
     )?;
 
     // Initial run was clean OR caller opted out of retry OR there's nothing
@@ -303,6 +308,7 @@ fn run_for_update_with_cancel(
         &mut retry_result,
         &diff_base,
         &setup_steps,
+        preserve_gate_env,
     )?;
 
     // The retry should be clean (no failure, no new fixup) for the
@@ -510,6 +516,7 @@ where
                 cancel,
                 Some(warm),
                 &mut RunResult::new("", ""),
+                false,
             )
         },
         progress_start,
@@ -643,6 +650,7 @@ where
                 cancel,
                 Some(warm),
                 &mut RunResult::new("", ""),
+                false,
             )
         },
         progress_start,
@@ -856,6 +864,7 @@ fn run_once(
     result: &mut RunResult,
     diff_base: &DiffBase,
     setup_steps: &[setup::SetupStep],
+    preserve_gate_env: bool,
 ) -> Result<OnceOutcome> {
     crate::interrupt::check()?;
     if cancel.is_cancelled() {
@@ -910,7 +919,12 @@ fn run_once(
     // The captured setup output rides along on the `captured_output`
     // field so it shows up in the same dump the user already sees
     // for a hook failure.
-    let setup_captured = match setup::run_steps(setup_steps, wt.path(), workspace_root) {
+    let setup_captured = match setup::run_steps_with_policy(
+        setup_steps,
+        wt.path(),
+        workspace_root,
+        preserve_gate_env,
+    ) {
         Ok(captured) => captured,
         Err(JjHooksError::SetupFailed {
             name,
@@ -1062,7 +1076,13 @@ fn run_once(
             };
             let argv = splice_runner_prefix(&runner_argv, &argv);
             tracing::info!("running (--all-files): {:?}", argv);
-            let code = run_subprocess(&argv, wt.path(), workspace_root, captured.as_mut())?;
+            let code = run_subprocess(
+                &argv,
+                wt.path(),
+                workspace_root,
+                captured.as_mut(),
+                preserve_gate_env,
+            )?;
             if runner_exit == 0 {
                 runner_exit = code;
             }
@@ -1092,7 +1112,13 @@ fn run_once(
             let argv = splice_runner_prefix(&runner_argv, &argv);
 
             tracing::info!("running: {:?}", argv);
-            let code = run_subprocess(&argv, wt.path(), workspace_root, captured.as_mut())?;
+            let code = run_subprocess(
+                &argv,
+                wt.path(),
+                workspace_root,
+                captured.as_mut(),
+                preserve_gate_env,
+            )?;
             if runner_exit == 0 {
                 runner_exit = code;
             }
@@ -1197,13 +1223,14 @@ fn run_subprocess(
     cwd: &Path,
     workspace_root: &Path,
     capture: Option<&mut String>,
+    preserve_gate_env: bool,
 ) -> Result<i32> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(cwd);
     // Merge the repo's direnv/devenv env (once-computed, cached) BEFORE
     // JJ_HOOKS_WORKSPACE so that variable always wins. No-op unless a batch
     // entrypoint populated the cache for this workspace_root.
-    crate::repo_env::apply_repo_env(&mut cmd, workspace_root);
+    crate::repo_env::apply_repo_env_with_policy(&mut cmd, workspace_root, preserve_gate_env);
     // Point CARGO_TARGET_DIR at the primary `target/` AFTER apply_repo_env so
     // a repo-env-carried value can never win. No-op unless enabled.
     crate::gate_cache::apply_gate_cache(&mut cmd, workspace_root);
@@ -1816,7 +1843,7 @@ mod tests {
             "printf 'MARK=[%s]' \"${REPO_ENV_MARKER:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        let code = run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
+        let code = run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
         assert_eq!(code, 0);
         // RED before T2: run_subprocess set only JJ_HOOKS_WORKSPACE, so the
         // child saw `unset` and this assertion failed.
@@ -1842,7 +1869,7 @@ mod tests {
             "printf 'GD=[%s]' \"${GIT_DIR:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
+        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
         assert!(buf.contains("GD=[unset]"), "captured: {buf:?}");
     }
 
@@ -1866,7 +1893,7 @@ mod tests {
             "printf 'GD=[%s]' \"${GIT_DIR:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
+        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
         unsafe {
             std::env::remove_var("GIT_DIR");
         }
@@ -1889,7 +1916,7 @@ mod tests {
             "printf 'WS=[%s]' \"${JJ_HOOKS_WORKSPACE:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
+        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
         assert!(
             buf.contains(&format!("WS=[{}]", ws.path().display())),
             "captured: {buf:?}"

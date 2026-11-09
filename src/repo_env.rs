@@ -23,11 +23,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-static PRESERVE_GATE_ENV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn preserve_gate_env() {
-    PRESERVE_GATE_ENV.store(true, std::sync::atomic::Ordering::Relaxed);
-}
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,6 +103,14 @@ fn repo_env_with(
 /// [`strip_git_local_env`]. Never touches `JJ_HOOKS_WORKSPACE` — callers set
 /// it AFTER this call so it always wins.
 pub fn apply_repo_env(cmd: &mut Command, workspace_root: &Path) {
+    apply_repo_env_with_policy(cmd, workspace_root, false);
+}
+
+pub(crate) fn apply_repo_env_with_policy(
+    cmd: &mut Command,
+    workspace_root: &Path,
+    preserve_gate_env: bool,
+) {
     // The git repo-location strip is a safety invariant of spawning a hook
     // from a detached worktree (`GIT_DIR` from the worktree outranks the
     // child's cwd), NOT a devenv-feature convenience — so it runs on every
@@ -133,7 +136,7 @@ pub fn apply_repo_env(cmd: &mut Command, workspace_root: &Path) {
         if matches!(
             key.as_str(),
             "RJC_MOON_TARGETS" | "RJC_MOON_REPORT" | "RJC_GATE_REPORT" | "MOON_BASE" | "MOON_HEAD"
-        ) && PRESERVE_GATE_ENV.load(std::sync::atomic::Ordering::Relaxed)
+        ) && preserve_gate_env
             && std::env::var_os(key).is_some()
         {
             continue;

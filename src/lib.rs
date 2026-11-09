@@ -225,7 +225,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             };
 
             if let (Some(from), Some(to)) = (from, to) {
-                repo_env::preserve_gate_env();
                 let mut result = hooks::RunResult::new(&from, &to);
                 let file = if let Some(path) = result_json.as_deref() {
                     let parent = path
@@ -263,6 +262,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
                         &update,
                         run_opts,
                         &mut result,
+                        true,
                     )?;
                     if let Some(captured) = &outcome.captured_output {
                         eprint!("{captured}");
