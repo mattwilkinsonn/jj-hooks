@@ -153,6 +153,10 @@ pub fn run_for_update(
     update: &BookmarkUpdate,
     opts: RunOpts,
 ) -> Result<HookOutcome> {
+    let mut result = RunResult::new(
+        update.old_commit.as_deref().unwrap_or_default(),
+        update.new_commit.as_deref().unwrap_or_default(),
+    );
     run_for_update_with_result(
         jj,
         primary_git_dir,
@@ -161,11 +165,11 @@ pub fn run_for_update(
         stage,
         update,
         opts,
-        None,
+        &mut result,
     )
 }
 
-/// Run one update and optionally write the first pass result.
+/// Run one update and record its first pass in the caller-owned result.
 #[allow(clippy::too_many_arguments)]
 pub fn run_for_update_with_result(
     jj: &JjCli,
@@ -175,7 +179,7 @@ pub fn run_for_update_with_result(
     stage: Stage,
     update: &BookmarkUpdate,
     opts: RunOpts,
-    result_path: Option<&Path>,
+    result: &mut RunResult,
 ) -> Result<HookOutcome> {
     let worktree_root = crate::worktree::worktree_root(jj);
     // Compute the repo's devenv/direnv env ONCE, eagerly, before any
@@ -201,7 +205,7 @@ pub fn run_for_update_with_result(
         opts,
         &Cancel::never(),
         None,
-        result_path,
+        result,
     );
     crate::interrupt::check()?;
     outcome
@@ -230,7 +234,7 @@ fn run_for_update_with_cancel(
     opts: RunOpts,
     cancel: &Cancel,
     warm: Option<&PklWarmCache>,
-    result_path: Option<&Path>,
+    result: &mut RunResult,
 ) -> Result<HookOutcome> {
     let Some(new_commit) = update.new_commit.as_ref() else {
         // Pure delete — nothing to check.
@@ -243,6 +247,8 @@ fn run_for_update_with_cancel(
             cancelled: false,
         });
     };
+    let diff_base = resolve_from_refs(jj, update)?;
+    let setup_steps = setup::load_steps(jj)?;
 
     let initial = run_once(
         jj,
@@ -257,7 +263,9 @@ fn run_for_update_with_cancel(
         opts.capture_output,
         cancel,
         warm,
-        result_path,
+        result,
+        &diff_base,
+        &setup_steps,
     )?;
 
     // Initial run was clean OR caller opted out of retry OR there's nothing
@@ -278,6 +286,7 @@ fn run_for_update_with_cancel(
     tracing::info!(
         "{update}: re-running hooks against fixup commit {fixup} to check for transient failure"
     );
+    let mut retry_result = RunResult::new(update.old_commit.as_deref().unwrap_or_default(), fixup);
     let retry = run_once(
         jj,
         primary_git_dir,
@@ -291,7 +300,9 @@ fn run_for_update_with_cancel(
         opts.capture_output,
         cancel,
         warm,
-        None,
+        &mut retry_result,
+        &diff_base,
+        &setup_steps,
     )?;
 
     // The retry should be clean (no failure, no new fixup) for the
@@ -498,7 +509,7 @@ where
                 opts,
                 cancel,
                 Some(warm),
-                None,
+                &mut RunResult::new("", ""),
             )
         },
         progress_start,
@@ -631,7 +642,7 @@ where
                 opts,
                 cancel,
                 Some(warm),
-                None,
+                &mut RunResult::new("", ""),
             )
         },
         progress_start,
@@ -795,6 +806,39 @@ fn splice_runner_prefix(prefix: &[String], command_argv: &[String]) -> Vec<Strin
 /// Callers (currently [`run_for_update`] and the batch entrypoint)
 /// decide whether to retry based on the returned `success` /
 /// `fixup_commit`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Phase {
+    ToolFailed,
+    NoConfig,
+    SetupFailed,
+    RunnerCompleted,
+    Fixup,
+}
+
+#[derive(serde::Serialize)]
+pub struct RunResult {
+    phase: Phase,
+    exit: i32,
+    from: String,
+    to: String,
+    config: Option<String>,
+    fixup: Option<String>,
+}
+
+impl RunResult {
+    pub fn new(from: &str, to: &str) -> Self {
+        Self {
+            phase: Phase::ToolFailed,
+            exit: 1,
+            from: from.into(),
+            to: to.into(),
+            config: None,
+            fixup: None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_once(
     jj: &JjCli,
@@ -809,108 +853,10 @@ fn run_once(
     capture_output: bool,
     cancel: &Cancel,
     warm: Option<&PklWarmCache>,
-    result_path: Option<&Path>,
-) -> Result<OnceOutcome> {
-    let mut result = RunResult {
-        phase: Phase::SetupFailed,
-        exit: 0,
-        from: update.old_commit.clone().unwrap_or_default(),
-        to: update.new_commit.clone().unwrap_or_default(),
-        config: None,
-        fixup: None,
-    };
-    let outcome = run_once_inner(
-        jj,
-        primary_git_dir,
-        worktree_root,
-        workspace_root,
-        cli_runner,
-        stage,
-        update,
-        target_commit,
-        all_files,
-        capture_output,
-        cancel,
-        warm,
-        &mut result,
-    );
-    if let Some(path) = result_path {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(&mut file, &result).map_err(std::io::Error::other)?;
-        file.persist(path).map_err(|e| e.error)?;
-    }
-    outcome
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Phase {
-    NoConfig,
-    SetupFailed,
-    RunnerCompleted,
-    Fixup,
-}
-
-#[derive(serde::Serialize)]
-struct RunResult {
-    phase: Phase,
-    exit: i32,
-    from: String,
-    to: String,
-    config: Option<String>,
-    fixup: Option<String>,
-}
-
-fn runner_config_path(root: &Path) -> Option<String> {
-    [
-        "hk.pkl",
-        "lefthook.yml",
-        "lefthook.yaml",
-        "lefthook.json",
-        "lefthook.jsonc",
-        "lefthook.toml",
-        ".lefthook.yml",
-        ".lefthook.yaml",
-        ".lefthook.json",
-        ".lefthook.jsonc",
-        ".lefthook.toml",
-        ".config/lefthook.yml",
-        ".config/lefthook.yaml",
-        ".config/lefthook.json",
-        ".config/lefthook.jsonc",
-        ".config/lefthook.toml",
-        ".pre-commit-config.yaml",
-        ".pre-commit-config.yml",
-        "prek.toml",
-        ".prek.toml",
-    ]
-    .into_iter()
-    .find(|path| root.join(path).exists())
-    .map(str::to_owned)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_once_inner(
-    jj: &JjCli,
-    primary_git_dir: &Path,
-    worktree_root: &Path,
-    workspace_root: &Path,
-    cli_runner: Option<Runner>,
-    stage: Stage,
-    update: &BookmarkUpdate,
-    target_commit: &str,
-    all_files: bool,
-    capture_output: bool,
-    cancel: &Cancel,
-    warm: Option<&PklWarmCache>,
     result: &mut RunResult,
+    diff_base: &DiffBase,
+    setup_steps: &[setup::SetupStep],
 ) -> Result<OnceOutcome> {
-    let diff_base = resolve_from_refs(jj, update)?;
-    let setup_steps = setup::load_steps(jj)?;
     crate::interrupt::check()?;
     if cancel.is_cancelled() {
         return Ok(OnceOutcome {
@@ -943,7 +889,7 @@ fn run_once_inner(
         });
     };
     let wt = Worktree::create(worktree_root, primary_git_dir, target_commit)?;
-    result.config = runner_config_path(wt.path());
+    result.config = cli_runner.and_then(|r| r.config_path(wt.path()));
 
     // User-declared setup commands (e.g. `bun install`) run inside
     // the worktree before the runner so hooks have install-time
@@ -964,7 +910,7 @@ fn run_once_inner(
     // The captured setup output rides along on the `captured_output`
     // field so it shows up in the same dump the user already sees
     // for a hook failure.
-    let setup_captured = match setup::run_steps(&setup_steps, wt.path(), workspace_root) {
+    let setup_captured = match setup::run_steps(setup_steps, wt.path(), workspace_root) {
         Ok(captured) => captured,
         Err(JjHooksError::SetupFailed {
             name,
@@ -982,9 +928,8 @@ fn run_once_inner(
                 "setup step `{name}` exited with status {status}; \
                  skipping hook runner for this bookmark\n",
             ));
-            if !capture_output {
-                eprint!("{buf}");
-            }
+            result.phase = Phase::SetupFailed;
+            result.exit = status;
             return Ok(OnceOutcome {
                 success: false,
                 fixup_commit: None,
@@ -1003,6 +948,7 @@ fn run_once_inner(
         Some(r) => r,
         None => {
             let Some(r) = Runner::autodetect(wt.path())? else {
+                result.exit = 0;
                 result.phase = Phase::NoConfig;
                 eprintln!(
                     "jj-hooks: {update}: no hook-runner config in target commit; skipping hooks"
@@ -1034,6 +980,7 @@ fn run_once_inner(
             crate::runner::prefer_prek_when_available(r, prek_present)
         }
     };
+    result.config = runner.config_path(wt.path());
 
     // Pre-check that the runner binary is on PATH. Without this, the
     // `Command::status()` call below surfaces a libc-level
@@ -1086,11 +1033,12 @@ fn run_once_inner(
     // shared worktree, mirroring how the standard pre-push pipeline
     // builds up its fixup.
     let all_files = all_files || matches!(diff_base, DiffBase::AllFiles);
-    let from_refs: &[String] = match &diff_base {
+    let from_refs: &[String] = match diff_base {
         DiffBase::Refs(refs) => refs,
         DiffBase::AllFiles => &[],
     };
     let mut success = true;
+    let mut runner_exit = 0;
     // Seed the captured buffer with the setup-step output when the
     // caller asked us to capture. Setup output is always captured
     // inside `run_steps` (it has to be, to attach it to a
@@ -1115,11 +1063,10 @@ fn run_once_inner(
             let argv = splice_runner_prefix(&runner_argv, &argv);
             tracing::info!("running (--all-files): {:?}", argv);
             let code = run_subprocess(&argv, wt.path(), workspace_root, captured.as_mut())?;
-            result.phase = Phase::RunnerCompleted;
-            result.exit = code;
-            if code != 0 {
-                success = false;
+            if runner_exit == 0 {
+                runner_exit = code;
             }
+            success &= code == 0;
         }
     } else {
         for from_ref in from_refs {
@@ -1146,11 +1093,10 @@ fn run_once_inner(
 
             tracing::info!("running: {:?}", argv);
             let code = run_subprocess(&argv, wt.path(), workspace_root, captured.as_mut())?;
-            result.phase = Phase::RunnerCompleted;
-            result.exit = code;
-            if code != 0 {
-                success = false;
+            if runner_exit == 0 {
+                runner_exit = code;
             }
+            success &= code == 0;
         }
     }
 
@@ -1165,9 +1111,6 @@ fn run_once_inner(
             }
         };
     if fixup_commit.is_some() {
-        result.phase = Phase::Fixup;
-        result.exit = 0;
-        result.fixup.clone_from(&fixup_commit);
         // jj git import created a `jj-hooks-fixup/<bookmark>` jj bookmark
         // from the underlying refs/heads/jj-hooks-fixup/<bookmark> ref.
         // Clean both up immediately — the user almost always wants to
@@ -1180,6 +1123,19 @@ fn run_once_inner(
     }
 
     crate::interrupt::check()?;
+    if !cancelled {
+        result.phase = if fixup_commit.is_some() {
+            Phase::Fixup
+        } else {
+            Phase::RunnerCompleted
+        };
+        result.exit = if fixup_commit.is_some() {
+            0
+        } else {
+            runner_exit
+        };
+        result.fixup.clone_from(&fixup_commit);
+    }
     Ok(OnceOutcome {
         success,
         fixup_commit,
@@ -1235,8 +1191,7 @@ fn forget_fixup(jj: &JjCli, primary_git_dir: &Path, bookmark: &str) {
 /// `capture` is `None`, the child inherits stdio so the user sees the
 /// runner's progress bar live.
 ///
-/// Returns `Ok(true)` on a zero exit, `Ok(false)` on any non-zero
-/// exit. IO errors (spawn failure, etc.) propagate as `Err`.
+/// Returns the exit code; signal termination and IO errors are tool failures.
 fn run_subprocess(
     argv: &[String],
     cwd: &Path,
@@ -1256,7 +1211,9 @@ fn run_subprocess(
     match capture {
         None => {
             let status = crate::interrupt::status(&mut cmd)?;
-            Ok(status.code().unwrap_or(1))
+            status
+                .code()
+                .ok_or_else(|| std::io::Error::other("hook runner terminated by signal").into())
         }
         Some(buf) => {
             let output = crate::interrupt::output(&mut cmd)?;
@@ -1271,7 +1228,10 @@ fn run_subprocess(
             if !buf.ends_with('\n') {
                 buf.push('\n');
             }
-            Ok(output.status.code().unwrap_or(1))
+            output
+                .status
+                .code()
+                .ok_or_else(|| std::io::Error::other("hook runner terminated by signal").into())
         }
     }
 }

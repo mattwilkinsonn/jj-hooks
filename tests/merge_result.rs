@@ -27,11 +27,17 @@ fn explicit_from_uses_release_parent_of_merge() {
     )
     .unwrap();
     std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let value = format!("\"{}\"", runner.display());
+    let runner_config = format!("\"{}\"", runner.display());
     assert!(
-        repo.jj(&["config", "set", "--repo", "jj-hooks.runner-bin.hk", &value])
-            .status
-            .success()
+        repo.jj(&[
+            "config",
+            "set",
+            "--repo",
+            "jj-hooks.runner-bin.hk",
+            &runner_config
+        ])
+        .status
+        .success()
     );
     let result = repo.tmp.path().join("result.json");
     let out = repo.jj_hooks_with_env(

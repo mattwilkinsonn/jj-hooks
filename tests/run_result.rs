@@ -71,6 +71,7 @@ fn no_config_is_success() {
     assert!(out.status.success(), "{}", show(&out));
     assert_eq!(result["phase"], "no-config");
     assert_eq!(result["exit"], 0);
+    assert!(result["config"].is_null());
 }
 
 #[test]
@@ -92,6 +93,7 @@ fn failed_setup_is_reported() {
         show(&out)
     );
     assert_eq!(result["phase"], "setup-failed");
+    assert_ne!(result["exit"], 0);
 }
 
 #[test]
@@ -100,6 +102,7 @@ fn fixup_result_survives_retry() {
     let (out, result) = run(&repo, &from, &to, &[], &[]);
     assert!(!out.status.success());
     assert_eq!(result["phase"], "fixup");
+    assert_eq!(result["exit"], 0);
     assert_eq!(result["from"], from);
     assert_eq!(result["to"], to);
     assert_eq!(result["fixup"].as_str().unwrap().len(), 40);
@@ -110,12 +113,24 @@ fn runner_inherits_gate_environment() {
     let (repo, from, to) = fixture(
         "test \"$RJC_MOON_TARGETS:$RJC_MOON_REPORT:$RJC_GATE_REPORT:$MOON_BASE:$MOON_HEAD\" = 'a:b:c:d:e'",
     );
+    repo.write(".envrc", "fixture\n");
+    let bin = repo.tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let direnv = bin.join("direnv");
+    std::fs::write(&direnv, "#!/bin/sh\nprintf '%s\\n' '{\"RJC_MOON_TARGETS\":\"wrong\",\"RJC_MOON_REPORT\":\"wrong\",\"RJC_GATE_REPORT\":\"wrong\",\"MOON_BASE\":\"wrong\",\"MOON_HEAD\":\"wrong\"}'\n").unwrap();
+    std::fs::set_permissions(&direnv, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let env = [
         ("RJC_MOON_TARGETS", "a"),
         ("RJC_MOON_REPORT", "b"),
         ("RJC_GATE_REPORT", "c"),
         ("MOON_BASE", "d"),
         ("MOON_HEAD", "e"),
+        ("PATH", &path),
     ];
     let (out, result) = run(&repo, &from, &to, &[], &env);
     assert!(out.status.success(), "{}", show(&out));
@@ -124,7 +139,7 @@ fn runner_inherits_gate_environment() {
 }
 
 #[test]
-fn worktree_failure_still_writes_setup_result() {
+fn worktree_failure_still_writes_tool_result() {
     let (repo, from, _) = fixture("exit 0");
     let (out, result) = run(
         &repo,
@@ -134,5 +149,124 @@ fn worktree_failure_still_writes_setup_result() {
         &[],
     );
     assert!(!out.status.success());
-    assert_eq!(result["phase"], "setup-failed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("worktree"),
+        "{}",
+        show(&out)
+    );
+    assert_eq!(result["phase"], "tool-failed");
+    assert_ne!(result["exit"], 0);
+}
+
+#[test]
+fn signal_death_is_tool_failure() {
+    let (repo, from, to) = fixture("kill -TERM $$");
+    let (out, result) = run(&repo, &from, &to, &[], &[]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(result["phase"], "tool-failed");
+    assert_ne!(result["exit"], 0);
+}
+
+#[test]
+fn missing_runner_is_tool_failure() {
+    let (repo, from, to) = fixture("exit 0");
+    let out = repo.jj(&[
+        "config",
+        "set",
+        "--repo",
+        "jj-hooks.runner-bin.hk",
+        "\"/nonexistent/runner\"",
+    ]);
+    assert!(out.status.success(), "{}", show(&out));
+    let (out, result) = run(&repo, &from, &to, &[], &[]);
+    assert!(!out.status.success());
+    assert_eq!(result["phase"], "tool-failed");
+    assert_ne!(result["exit"], 0);
+}
+
+#[test]
+fn retry_heals_but_preserves_fixup_evidence() {
+    let (repo, from, to) = fixture(
+        "if test \"$(cat change.txt)\" = changed; then echo fixed > change.txt; exit 1; fi\nexit 0",
+    );
+    let (out, result) = run(&repo, &from, &to, &[], &[]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(result["phase"], "fixup");
+    assert_eq!(result["exit"], 0);
+    assert_eq!(result["fixup"].as_str().unwrap().len(), 40);
+}
+
+#[test]
+fn no_retry_keeps_first_fixup() {
+    let (repo, from, to) = fixture("echo fixed > change.txt; exit 1");
+    let (out, result) = run(&repo, &from, &to, &["--no-retry-after-fixup"], &[]);
+    assert!(!out.status.success());
+    assert_eq!(result["phase"], "fixup");
+    assert_eq!(result["exit"], 0);
+}
+
+#[test]
+fn invalid_endpoints_are_rejected() {
+    let (repo, from, to) = fixture("exit 0");
+    for args in [
+        vec!["run", "--from", &from],
+        vec!["run", "--from", "main", "--to", &to],
+        vec!["run", "--from", &from, "--to", "@"],
+    ] {
+        assert!(!repo.jj_hooks(&args).status.success());
+    }
+}
+
+#[test]
+fn unwritable_result_prevents_runner() {
+    let (repo, from, to) = fixture("touch \"$MARKER\"");
+    let marker = repo.tmp.path().join("marker");
+    let result = repo.tmp.path().join("missing/result.json");
+    let out = repo.jj_hooks_with_env(
+        &[
+            "run",
+            "--from",
+            &from,
+            "--to",
+            &to,
+            "--result-json",
+            result.to_str().unwrap(),
+        ],
+        &[("MARKER", marker.to_str().unwrap())],
+    );
+    assert!(!out.status.success());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn stale_result_is_replaced_on_early_error() {
+    let (repo, from, to) = fixture("exit 0");
+    let result = repo.tmp.path().join("result.json");
+    std::fs::write(&result, "stale").unwrap();
+    let out = repo.jj_hooks_in(
+        repo.tmp.path(),
+        &[
+            "run",
+            "--from",
+            &from,
+            "--to",
+            &to,
+            "--result-json",
+            result.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    let value: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+    assert_eq!(value["phase"], "tool-failed");
+}
+
+#[test]
+fn post_runner_fixup_failure_is_not_runner_evidence() {
+    let (repo, from, to) = fixture(
+        "index=$(git rev-parse --git-path index); rm -f \"$index\"; mkdir \"$index\"; exit 0",
+    );
+    let (out, result) = run(&repo, &from, &to, &[], &[]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(result["phase"], "tool-failed");
+    assert_ne!(result["exit"], 0);
 }

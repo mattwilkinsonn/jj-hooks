@@ -23,6 +23,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+static PRESERVE_GATE_ENV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn preserve_gate_env() {
+    PRESERVE_GATE_ENV.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -124,10 +129,12 @@ pub fn apply_repo_env(cmd: &mut Command, workspace_root: &Path) {
     };
     let git_local = git_local_env_vars();
     for (key, value) in map {
+        // Explicit range runs must keep the caller's gate selection and bounds.
         if matches!(
             key.as_str(),
             "RJC_MOON_TARGETS" | "RJC_MOON_REPORT" | "RJC_GATE_REPORT" | "MOON_BASE" | "MOON_HEAD"
-        ) && std::env::var_os(key).is_some()
+        ) && PRESERVE_GATE_ENV.load(std::sync::atomic::Ordering::Relaxed)
+            && std::env::var_os(key).is_some()
         {
             continue;
         }

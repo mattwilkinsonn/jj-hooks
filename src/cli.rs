@@ -66,9 +66,9 @@ pub enum Command {
         revset: String,
 
         /// Exact diff endpoints, supplied together.
-        #[arg(long, requires = "to", conflicts_with_all = ["revset", "all_files"])]
+        #[arg(long, requires = "to", conflicts_with_all = ["revset", "all_files"], value_parser = parse_commit_id)]
         from: Option<String>,
-        #[arg(long, requires = "from")]
+        #[arg(long, requires = "from", value_parser = parse_commit_id)]
         to: Option<String>,
         /// Write a structured result atomically.
         #[arg(long, requires_all = ["from", "to"])]
@@ -125,6 +125,14 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+fn parse_commit_id(value: &str) -> Result<String, String> {
+    if value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(value.to_owned())
+    } else {
+        Err("expected a 40-hex commit id".into())
+    }
 }
 
 /// All flags that `jj git push` accepts and that we model explicitly.

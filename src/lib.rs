@@ -213,7 +213,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             no_retry_after_fixup,
             all_files,
         } => {
-            let workspace_root = jj.workspace_root()?;
             // Same per-worktree autodetect contract as the push path: the
             // runner is picked from the target commit's own tree, not from
             // the primary workspace. `--runner` overrides.
@@ -226,30 +225,63 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
             };
 
             if let (Some(from), Some(to)) = (from, to) {
-                let update = bookmark_updates::BookmarkUpdate {
-                    remote: "<local>".into(),
-                    bookmark: "range".into(),
-                    update_type: bookmark_updates::UpdateType::MoveForward,
-                    old_commit: Some(from),
-                    new_commit: Some(to),
+                repo_env::preserve_gate_env();
+                let mut result = hooks::RunResult::new(&from, &to);
+                let file = if let Some(path) = result_json.as_deref() {
+                    let parent = path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(std::path::Path::new("."));
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                    Some((tempfile::NamedTempFile::new_in(parent)?, path))
+                } else {
+                    None
                 };
-                let git_dir = jj::primary_git_dir(&workspace_root)?;
-                let outcome = hooks::run_for_update_with_result(
-                    &jj,
-                    &git_dir,
-                    &workspace_root,
-                    cli_runner,
-                    stage.into(),
-                    &update,
-                    run_opts,
-                    result_json.as_deref(),
-                )?;
+                let outcome = (|| {
+                    let workspace_root = jj.workspace_root()?;
+                    let git_dir = jj::primary_git_dir(&workspace_root)?;
+                    let unique = tempfile::Builder::new()
+                        .prefix("range-")
+                        .tempfile_in(&git_dir)?;
+                    let bookmark = unique
+                        .path()
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("temporary ref name missing"))?
+                        .to_string_lossy()
+                        .into_owned();
+                    let update = bookmark_updates::BookmarkUpdate::range(bookmark, from, to);
+                    let outcome = hooks::run_for_update_with_result(
+                        &jj,
+                        &git_dir,
+                        &workspace_root,
+                        cli_runner,
+                        stage.into(),
+                        &update,
+                        run_opts,
+                        &mut result,
+                    )?;
+                    if let Some(captured) = &outcome.captured_output {
+                        eprint!("{captured}");
+                    }
+                    Ok::<_, JjHooksError>(outcome)
+                })();
+                if let Some((mut temp, path)) = file {
+                    serde_json::to_writer(&mut temp, &result).map_err(std::io::Error::other)?;
+                    temp.as_file().sync_all()?;
+                    temp.persist(path).map_err(|e| e.error)?;
+                }
+                let outcome = outcome?;
                 Ok(if outcome.success && outcome.fixup_commit.is_none() {
                     ExitCode::SUCCESS
                 } else {
                     ExitCode::from(1)
                 })
             } else {
+                let workspace_root = jj.workspace_root()?;
                 run_for_revset(
                     &jj,
                     &workspace_root,
