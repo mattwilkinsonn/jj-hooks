@@ -124,6 +124,13 @@ pub fn apply_repo_env(cmd: &mut Command, workspace_root: &Path) {
     };
     let git_local = git_local_env_vars();
     for (key, value) in map {
+        if matches!(
+            key.as_str(),
+            "RJC_MOON_TARGETS" | "RJC_MOON_REPORT" | "RJC_GATE_REPORT" | "MOON_BASE" | "MOON_HEAD"
+        ) && std::env::var_os(key).is_some()
+        {
+            continue;
+        }
         // Git repo-location vars are handled by the unconditional strip above,
         // never applied from the patch.
         if git_local.contains(key) {

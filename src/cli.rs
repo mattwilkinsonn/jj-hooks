@@ -65,6 +65,15 @@ pub enum Command {
         #[arg(default_value = "@")]
         revset: String,
 
+        /// Exact diff endpoints, supplied together.
+        #[arg(long, requires = "to", conflicts_with_all = ["revset", "all_files"])]
+        from: Option<String>,
+        #[arg(long, requires = "from")]
+        to: Option<String>,
+        /// Write a structured result atomically.
+        #[arg(long, requires_all = ["from", "to"])]
+        result_json: Option<std::path::PathBuf>,
+
         /// Disable the post-fixup retry. See `push --no-retry-after-fixup`.
         #[arg(long)]
         no_retry_after_fixup: bool,

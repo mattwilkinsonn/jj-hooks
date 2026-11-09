@@ -207,6 +207,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
         Command::Run {
             stage,
             revset,
+            from,
+            to,
+            result_json,
             no_retry_after_fixup,
             all_files,
         } => {
@@ -222,14 +225,40 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
                 capture_output: false,
             };
 
-            run_for_revset(
-                &jj,
-                &workspace_root,
-                cli_runner,
-                stage.into(),
-                &revset,
-                run_opts,
-            )
+            if let (Some(from), Some(to)) = (from, to) {
+                let update = bookmark_updates::BookmarkUpdate {
+                    remote: "<local>".into(),
+                    bookmark: "range".into(),
+                    update_type: bookmark_updates::UpdateType::MoveForward,
+                    old_commit: Some(from),
+                    new_commit: Some(to),
+                };
+                let git_dir = jj::primary_git_dir(&workspace_root)?;
+                let outcome = hooks::run_for_update_with_result(
+                    &jj,
+                    &git_dir,
+                    &workspace_root,
+                    cli_runner,
+                    stage.into(),
+                    &update,
+                    run_opts,
+                    result_json.as_deref(),
+                )?;
+                Ok(if outcome.success && outcome.fixup_commit.is_none() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                })
+            } else {
+                run_for_revset(
+                    &jj,
+                    &workspace_root,
+                    cli_runner,
+                    stage.into(),
+                    &revset,
+                    run_opts,
+                )
+            }
         }
 
         Command::PushTags {
