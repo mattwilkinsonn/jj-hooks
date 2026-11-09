@@ -379,7 +379,8 @@ email = "tests@jj-hooks.invalid"
     .unwrap();
 
     let jj_hooks_bin = env!("CARGO_BIN_EXE_jj-hooks");
-    let out = std::process::Command::new(jj_hooks_bin)
+    let mut command = std::process::Command::new(jj_hooks_bin);
+    command
         .args([
             "--runner", "prek", "push", "--stage", "pre-push", "-b", "main",
         ])
@@ -397,9 +398,13 @@ email = "tests@jj-hooks.invalid"
         // Force uv to operate fully offline. The .venv is pre-staged
         // so this should never need to fetch anything; --offline
         // makes that explicit and fails fast if assumed otherwise.
-        .env("UV_OFFLINE", "1")
-        .output()
-        .unwrap();
+        .env("UV_OFFLINE", "1");
+    // The Nix check environment supplies this for rustls; preserve it across
+    // env_clear so uv can build its HTTP client even with UV_OFFLINE enabled.
+    if let Some(cert_file) = std::env::var_os("SSL_CERT_FILE") {
+        command.env("SSL_CERT_FILE", cert_file);
+    }
+    let out = command.output().unwrap();
 
     assert!(
         out.status.success(),
