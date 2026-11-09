@@ -128,10 +128,14 @@ pub enum Command {
 }
 
 fn parse_commit_id(value: &str) -> Result<String, String> {
-    if value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if value.len() == 40
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         Ok(value.to_owned())
     } else {
-        Err("expected a 40-hex commit id".into())
+        Err("expected a 40-character lowercase hex commit id".into())
     }
 }
 

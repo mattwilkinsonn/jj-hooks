@@ -183,9 +183,15 @@ pub(crate) fn run_steps_with_policy(
         }
 
         if !output.status.success() {
+            let status = output.status.code().ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "setup step `{}` terminated by signal",
+                    step.label()
+                ))
+            })?;
             return Err(JjHooksError::SetupFailed {
                 name: step.label().to_owned(),
-                status: output.status.code().unwrap_or(-1),
+                status,
                 captured,
             });
         }

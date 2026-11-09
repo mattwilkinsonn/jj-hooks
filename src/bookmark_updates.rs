@@ -33,6 +33,10 @@ impl BookmarkUpdate {
             new_commit: Some(to),
         }
     }
+
+    pub(crate) fn revset(revset: &str, from: String, to: String) -> Self {
+        Self::range(format!("revset:{revset}"), from, to)
+    }
 }
 
 impl std::fmt::Display for BookmarkUpdate {

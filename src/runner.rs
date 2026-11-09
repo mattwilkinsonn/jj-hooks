@@ -17,6 +17,7 @@ pub enum Runner {
     Lefthook,
     Hk,
 }
+const PREK_FILES: &[&str] = &["prek.toml", ".prek.toml"];
 
 impl Runner {
     pub fn bin(self) -> &'static str {
@@ -84,16 +85,12 @@ impl Runner {
                 Runner::PreCommit,
                 &[".pre-commit-config.yaml", ".pre-commit-config.yml"],
             ),
-            (Runner::Prek, &["prek.toml", ".prek.toml"]),
+            (Runner::Prek, PREK_FILES),
         ]
     }
 
     pub fn config_path(self, root: &Path) -> Option<String> {
-        let runner = if self == Runner::Prek
-            && !["prek.toml", ".prek.toml"]
-                .iter()
-                .any(|p| root.join(p).exists())
-        {
+        let runner = if self == Runner::Prek && !PREK_FILES.iter().any(|p| root.join(p).exists()) {
             Runner::PreCommit
         } else {
             self

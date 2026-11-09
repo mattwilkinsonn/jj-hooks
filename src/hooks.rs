@@ -504,6 +504,8 @@ where
         updates,
         opts.capture_output,
         |_idx, update, cancel| {
+            let mut unused_result = RunResult::new("", "");
+            let preserve_gate_env = false;
             run_for_update_with_cancel(
                 jj,
                 primary_git_dir,
@@ -515,8 +517,8 @@ where
                 opts,
                 cancel,
                 Some(warm),
-                &mut RunResult::new("", ""),
-                false,
+                &mut unused_result,
+                preserve_gate_env,
             )
         },
         progress_start,
@@ -638,6 +640,8 @@ where
         partitions,
         opts.capture_output,
         |_p_idx, _u_idx, update, cancel| {
+            let mut unused_result = RunResult::new("", "");
+            let preserve_gate_env = false;
             run_for_update_with_cancel(
                 jj,
                 primary_git_dir,
@@ -649,8 +653,8 @@ where
                 opts,
                 cancel,
                 Some(warm),
-                &mut RunResult::new("", ""),
-                false,
+                &mut unused_result,
+                preserve_gate_env,
             )
         },
         progress_start,
@@ -797,23 +801,7 @@ fn splice_runner_prefix(prefix: &[String], command_argv: &[String]) -> Vec<Strin
     out
 }
 
-/// One pass through the hook pipeline against a specific target commit.
-///
-/// Builds a fresh worktree at `target_commit`, runs the hook backend
-/// against each entry in `from_refs`, and, if the worktree's tree
-/// differs from `target_commit`'s tree at the end, builds a fixup
-/// commit + cleans up the temp ref / bookmark that `jj git import`
-/// creates.
-///
-/// When `capture_output` is true, every subprocess's stdout+stderr
-/// gets folded into the returned `OnceOutcome::captured_output`
-/// instead of streaming to the parent terminal. The trade is no live
-/// progress bar — the caller (typically [`run_for_updates_parallel`])
-/// replays the captured block when the pass finishes.
-///
-/// Callers (currently [`run_for_update`] and the batch entrypoint)
-/// decide whether to retry based on the returned `success` /
-/// `fixup_commit`.
+/// Phase reached by the first pass.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
@@ -846,7 +834,23 @@ impl RunResult {
         }
     }
 }
-
+/// One pass through the hook pipeline against a specific target commit.
+///
+/// Builds a fresh worktree at `target_commit`, runs the hook backend
+/// against each entry in `from_refs`, and, if the worktree's tree
+/// differs from `target_commit`'s tree at the end, builds a fixup
+/// commit + cleans up the temp ref / bookmark that `jj git import`
+/// creates.
+///
+/// When `capture_output` is true, every subprocess's stdout+stderr
+/// gets folded into the returned `OnceOutcome::captured_output`
+/// instead of streaming to the parent terminal. The trade is no live
+/// progress bar — the caller (typically [`run_for_updates_parallel`])
+/// replays the captured block when the pass finishes.
+///
+/// Callers (currently [`run_for_update`] and the batch entrypoint)
+/// decide whether to retry based on the returned `success` /
+/// `fixup_commit`.
 #[allow(clippy::too_many_arguments)]
 fn run_once(
     jj: &JjCli,
@@ -943,7 +947,7 @@ fn run_once(
                  skipping hook runner for this bookmark\n",
             ));
             result.phase = Phase::SetupFailed;
-            result.exit = status;
+            result.exit = 0;
             return Ok(OnceOutcome {
                 success: false,
                 fixup_commit: None,
@@ -1083,10 +1087,7 @@ fn run_once(
                 captured.as_mut(),
                 preserve_gate_env,
             )?;
-            if runner_exit == 0 {
-                runner_exit = code;
-            }
-            success &= code == 0;
+            record_runner_exit(&mut runner_exit, &mut success, code);
         }
     } else {
         for from_ref in from_refs {
@@ -1119,10 +1120,7 @@ fn run_once(
                 captured.as_mut(),
                 preserve_gate_env,
             )?;
-            if runner_exit == 0 {
-                runner_exit = code;
-            }
-            success &= code == 0;
+            record_runner_exit(&mut runner_exit, &mut success, code);
         }
     }
 
@@ -1207,6 +1205,13 @@ fn forget_fixup(jj: &JjCli, primary_git_dir: &Path, bookmark: &str) {
     if let Err(error) = delete_git_ref(primary_git_dir, &fixup_ref(bookmark)) {
         tracing::debug!("deleting fixup ref for {bookmark} failed: {error}");
     }
+}
+
+fn record_runner_exit(first_exit: &mut i32, success: &mut bool, code: i32) {
+    if *first_exit == 0 {
+        *first_exit = code;
+    }
+    *success &= code == 0;
 }
 
 /// Run a hook subprocess. When `capture` is `Some`, the child's

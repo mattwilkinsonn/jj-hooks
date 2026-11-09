@@ -48,6 +48,21 @@ fn run(
     (out, result)
 }
 
+fn assert_fixup(repo: &TestRepo, result: &Value) {
+    let id = result["fixup"].as_str().unwrap();
+    assert_eq!(id.len(), 40);
+    let out = std::process::Command::new("git")
+        .current_dir(repo.primary())
+        .args(["show", &format!("{id}:change.txt")])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", show(&out));
+    assert_eq!(out.stdout, b"fixed\n");
+    let out = repo.jj(&["log", "--no-graph", "-r", id, "-T", "commit_id"]);
+    assert!(out.status.success(), "{}", show(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), id);
+}
+
 #[test]
 fn runner_completed_reports_exit_and_endpoints() {
     let (repo, from, to) = fixture("exit 7");
@@ -93,7 +108,7 @@ fn failed_setup_is_reported() {
         show(&out)
     );
     assert_eq!(result["phase"], "setup-failed");
-    assert_ne!(result["exit"], 0);
+    assert_eq!(result["exit"], 0);
 }
 
 #[test]
@@ -101,11 +116,12 @@ fn fixup_result_survives_retry() {
     let (repo, from, to) = fixture("echo fixed > change.txt\nexit 1");
     let (out, result) = run(&repo, &from, &to, &[], &[]);
     assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(result["fixup"].as_str().unwrap()));
     assert_eq!(result["phase"], "fixup");
     assert_eq!(result["exit"], 0);
     assert_eq!(result["from"], from);
     assert_eq!(result["to"], to);
-    assert_eq!(result["fixup"].as_str().unwrap().len(), 40);
+    assert_fixup(&repo, &result);
 }
 
 #[test]
@@ -150,7 +166,7 @@ fn worktree_failure_still_writes_tool_result() {
     );
     assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("worktree"),
+        String::from_utf8_lossy(&out.stderr).contains("git worktree add failed"),
         "{}",
         show(&out)
     );
@@ -192,8 +208,9 @@ fn retry_heals_but_preserves_fixup_evidence() {
     let (out, result) = run(&repo, &from, &to, &[], &[]);
     assert!(!out.status.success(), "{}", show(&out));
     assert_eq!(result["phase"], "fixup");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("re-run on fixup commit was clean"));
     assert_eq!(result["exit"], 0);
-    assert_eq!(result["fixup"].as_str().unwrap().len(), 40);
+    assert_fixup(&repo, &result);
 }
 
 #[test]
@@ -203,6 +220,7 @@ fn no_retry_keeps_first_fixup() {
     assert!(!out.status.success());
     assert_eq!(result["phase"], "fixup");
     assert_eq!(result["exit"], 0);
+    assert_fixup(&repo, &result);
 }
 
 #[test]
@@ -269,4 +287,39 @@ fn post_runner_fixup_failure_is_not_runner_evidence() {
     assert!(!out.status.success(), "{}", show(&out));
     assert_eq!(result["phase"], "tool-failed");
     assert_ne!(result["exit"], 0);
+}
+
+#[test]
+fn signal_killed_setup_is_tool_failure() {
+    let (repo, from, to) = fixture("exit 0");
+    let out = repo.jj(&[
+        "config",
+        "set",
+        "--repo",
+        "jj-hooks.setup",
+        r#"[{ name = "killed", run = ["sh", "-c", "kill -TERM $$"] }]"#,
+    ]);
+    assert!(out.status.success(), "{}", show(&out));
+    let (out, result) = run(&repo, &from, &to, &[], &[]);
+    assert!(!out.status.success(), "{}", show(&out));
+    assert_eq!(result["phase"], "tool-failed");
+    assert_ne!(result["exit"], 0);
+}
+
+#[test]
+fn parse_error_removes_stale_result() {
+    let (repo, from, to) = fixture("exit 0");
+    let path = repo.tmp.path().join("result.json");
+    for args in [
+        vec!["run", "--from", "invalid", "--to", &to],
+        vec!["run", "--from", &from],
+        vec!["run", "--from", &from.to_uppercase(), "--to", &to],
+    ] {
+        std::fs::write(&path, "stale").unwrap();
+        let mut args = args;
+        args.extend(["--result-json", path.to_str().unwrap()]);
+        let out = repo.jj_hooks(&args);
+        assert!(!out.status.success());
+        assert!(!path.exists());
+    }
 }
