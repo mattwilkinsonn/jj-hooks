@@ -25,6 +25,13 @@ they're identical.
 `jj-hp run [REVSET]` runs hooks against a revset without pushing — useful for
 "lint this change before I move on" workflows.
 
+`jj-hp run --from <40-hex> --to <40-hex> --result-json <path>` atomically
+writes first-pass evidence, even when a fixup triggers a retry. Phases are
+`no-config`, `setup-failed`, `runner-completed`, `fixup`, and `tool-failed`;
+only `runner-completed` carries a runner exit code. An unusable result path
+prevents the run. Failure to start or abrupt termination can leave no result.
+Use `--no-retry-after-fixup` to disable retry.
+
 ## Why a worktree?
 
 Earlier jj + pre-commit integrations ran hooks in the user's working copy,

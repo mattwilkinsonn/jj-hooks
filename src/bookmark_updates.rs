@@ -23,6 +23,22 @@ pub struct BookmarkUpdate {
     pub new_commit: Option<String>,
 }
 
+impl BookmarkUpdate {
+    pub(crate) fn range(bookmark: String, from: String, to: String) -> Self {
+        Self {
+            remote: "<local>".into(),
+            bookmark,
+            update_type: UpdateType::MoveForward,
+            old_commit: Some(from),
+            new_commit: Some(to),
+        }
+    }
+
+    pub(crate) fn revset(revset: &str, from: String, to: String) -> Self {
+        Self::range(format!("revset:{revset}"), from, to)
+    }
+}
+
 impl std::fmt::Display for BookmarkUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let verb = match self.update_type {

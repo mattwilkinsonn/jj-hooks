@@ -103,6 +103,14 @@ fn repo_env_with(
 /// [`strip_git_local_env`]. Never touches `JJ_HOOKS_WORKSPACE` — callers set
 /// it AFTER this call so it always wins.
 pub fn apply_repo_env(cmd: &mut Command, workspace_root: &Path) {
+    apply_repo_env_with_policy(cmd, workspace_root, false);
+}
+
+pub(crate) fn apply_repo_env_with_policy(
+    cmd: &mut Command,
+    workspace_root: &Path,
+    preserve_gate_env: bool,
+) {
     // The git repo-location strip is a safety invariant of spawning a hook
     // from a detached worktree (`GIT_DIR` from the worktree outranks the
     // child's cwd), NOT a devenv-feature convenience — so it runs on every
@@ -124,6 +132,15 @@ pub fn apply_repo_env(cmd: &mut Command, workspace_root: &Path) {
     };
     let git_local = git_local_env_vars();
     for (key, value) in map {
+        // Explicit range runs must keep the caller's gate selection and bounds.
+        if matches!(
+            key.as_str(),
+            "RJC_MOON_TARGETS" | "RJC_MOON_REPORT" | "RJC_GATE_REPORT" | "MOON_BASE" | "MOON_HEAD"
+        ) && preserve_gate_env
+            && std::env::var_os(key).is_some()
+        {
+            continue;
+        }
         // Git repo-location vars are handled by the unconditional strip above,
         // never applied from the patch.
         if git_local.contains(key) {

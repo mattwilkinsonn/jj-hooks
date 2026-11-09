@@ -17,6 +17,7 @@ pub enum Runner {
     Lefthook,
     Hk,
 }
+const PREK_FILES: &[&str] = &["prek.toml", ".prek.toml"];
 
 impl Runner {
     pub fn bin(self) -> &'static str {
@@ -31,47 +32,7 @@ impl Runner {
     /// Filesystem probe for runner config files at `root`. Returns Ok(Some)
     /// for a single match, Ok(None) for no match, Err for ambiguous.
     pub fn autodetect(root: &Path) -> Result<Option<Runner>> {
-        let candidates = [
-            (Runner::Hk, &["hk.pkl"][..]),
-            // Lefthook autodetects its config as MainConfigNames x
-            // Extensions: names `lefthook` / `.lefthook` / `.config/lefthook`
-            // crossed with `.yml` / `.yaml` / `.json` / `.jsonc` / `.toml`
-            // (see lefthook `internal/config/loader.go`). Mirror that full
-            // 15-path set here so a repo using any of lefthook's own config
-            // forms is detected rather than silently skipped.
-            (
-                Runner::Lefthook,
-                &[
-                    "lefthook.yml",
-                    "lefthook.yaml",
-                    "lefthook.json",
-                    "lefthook.jsonc",
-                    "lefthook.toml",
-                    ".lefthook.yml",
-                    ".lefthook.yaml",
-                    ".lefthook.json",
-                    ".lefthook.jsonc",
-                    ".lefthook.toml",
-                    ".config/lefthook.yml",
-                    ".config/lefthook.yaml",
-                    ".config/lefthook.json",
-                    ".config/lefthook.jsonc",
-                    ".config/lefthook.toml",
-                ][..],
-            ),
-            (
-                Runner::PreCommit,
-                &[".pre-commit-config.yaml", ".pre-commit-config.yml"][..],
-            ),
-            // prek reads its own native `prek.toml` as well as
-            // `.pre-commit-config.yaml`. If only `prek.toml` is present we
-            // need to pick `Runner::Prek` directly — `prefer_prek_when_available`
-            // only swaps in prek when the autodetected runner was PreCommit,
-            // so without this match a prek-native repo silently skips hooks
-            // ("no hook-runner config in target commit").
-            (Runner::Prek, &["prek.toml", ".prek.toml"][..]),
-        ];
-
+        let candidates = Self::candidates();
         let mut found: Vec<Runner> = Vec::new();
         for (runner, files) in candidates {
             if files.iter().any(|f| root.join(f).exists()) {
@@ -95,6 +56,50 @@ impl Runner {
                 many.iter().map(|r| r.bin()).collect::<Vec<_>>()
             ))),
         }
+    }
+
+    fn candidates() -> [(Runner, &'static [&'static str]); 4] {
+        [
+            (Runner::Hk, &["hk.pkl"]),
+            (
+                Runner::Lefthook,
+                &[
+                    "lefthook.yml",
+                    "lefthook.yaml",
+                    "lefthook.json",
+                    "lefthook.jsonc",
+                    "lefthook.toml",
+                    ".lefthook.yml",
+                    ".lefthook.yaml",
+                    ".lefthook.json",
+                    ".lefthook.jsonc",
+                    ".lefthook.toml",
+                    ".config/lefthook.yml",
+                    ".config/lefthook.yaml",
+                    ".config/lefthook.json",
+                    ".config/lefthook.jsonc",
+                    ".config/lefthook.toml",
+                ],
+            ),
+            (
+                Runner::PreCommit,
+                &[".pre-commit-config.yaml", ".pre-commit-config.yml"],
+            ),
+            (Runner::Prek, PREK_FILES),
+        ]
+    }
+
+    pub fn config_path(self, root: &Path) -> Option<String> {
+        let runner = if self == Runner::Prek && !PREK_FILES.iter().any(|p| root.join(p).exists()) {
+            Runner::PreCommit
+        } else {
+            self
+        };
+        Self::candidates()
+            .into_iter()
+            .find(|(candidate, _)| *candidate == runner)
+            .and_then(|(_, files)| files.iter().find(|file| root.join(file).exists()))
+            .map(|path| (*path).to_owned())
     }
 }
 

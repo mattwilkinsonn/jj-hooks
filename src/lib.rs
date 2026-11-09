@@ -67,7 +67,17 @@ pub fn run() -> ExitCode {
     let cmd = Cli::command()
         .name(bin_name_static)
         .bin_name(bin_name_static);
-    let cli = Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|e| e.exit());
+    let args: Vec<_> = std::env::args_os().collect();
+    let matches = match cmd.try_get_matches_from(&args) {
+        Ok(matches) => matches,
+        Err(error) => {
+            if error.use_stderr() {
+                clear_result_on_parse_error(&args);
+            }
+            error.exit();
+        }
+    };
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -87,6 +97,31 @@ pub fn run() -> ExitCode {
             }
             eprintln!("jj-hooks: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+fn clear_result_on_parse_error(args: &[std::ffi::OsString]) {
+    let Some(run) = args.iter().position(|arg| arg == "run") else {
+        return;
+    };
+    let mut args = args[run + 1..].iter();
+    while let Some(arg) = args.next() {
+        let path = if arg == "--result-json" {
+            args.next().map(std::path::PathBuf::from)
+        } else {
+            arg.to_str()
+                .and_then(|arg| arg.strip_prefix("--result-json="))
+                .map(std::path::PathBuf::from)
+        };
+        if let Some(path) = path
+            && let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "jj-hooks: could not remove stale result {}: {error}",
+                path.display()
+            );
         }
     }
 }
@@ -207,10 +242,12 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
         Command::Run {
             stage,
             revset,
+            from,
+            to,
+            result_json,
             no_retry_after_fixup,
             all_files,
         } => {
-            let workspace_root = jj.workspace_root()?;
             // Same per-worktree autodetect contract as the push path: the
             // runner is picked from the target commit's own tree, not from
             // the primary workspace. `--runner` overrides.
@@ -222,14 +259,72 @@ fn dispatch(cli: Cli) -> Result<ExitCode, JjHooksError> {
                 capture_output: false,
             };
 
-            run_for_revset(
-                &jj,
-                &workspace_root,
-                cli_runner,
-                stage.into(),
-                &revset,
-                run_opts,
-            )
+            if let (Some(from), Some(to)) = (from, to) {
+                let mut result = hooks::RunResult::new(&from, &to);
+                let file = if let Some(path) = result_json.as_deref() {
+                    let parent = path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(std::path::Path::new("."));
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                    Some((tempfile::NamedTempFile::new_in(parent)?, path))
+                } else {
+                    None
+                };
+                let outcome = (|| {
+                    let workspace_root = jj.workspace_root()?;
+                    let git_dir = jj::primary_git_dir(&workspace_root)?;
+                    let unique = tempfile::Builder::new().prefix("range-").tempfile()?;
+                    let bookmark = unique
+                        .path()
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("temporary ref name missing"))?
+                        .to_string_lossy()
+                        .into_owned();
+                    let update = bookmark_updates::BookmarkUpdate::range(bookmark, from, to);
+                    let outcome = hooks::run_for_update_with_result(
+                        &jj,
+                        &git_dir,
+                        &workspace_root,
+                        cli_runner,
+                        stage.into(),
+                        &update,
+                        run_opts,
+                        &mut result,
+                        true,
+                    )?;
+                    if let Some(captured) = &outcome.captured_output {
+                        eprint!("{captured}");
+                    }
+                    Ok::<_, JjHooksError>(outcome)
+                })();
+                if let Some((mut temp, path)) = file {
+                    serde_json::to_writer(&mut temp, &result).map_err(std::io::Error::other)?;
+                    temp.as_file().sync_all()?;
+                    temp.persist(path).map_err(|e| e.error)?;
+                }
+                let outcome = outcome?;
+                report_run_outcome(&outcome);
+                Ok(if outcome.success && outcome.fixup_commit.is_none() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                })
+            } else {
+                let workspace_root = jj.workspace_root()?;
+                run_for_revset(
+                    &jj,
+                    &workspace_root,
+                    cli_runner,
+                    stage.into(),
+                    &revset,
+                    run_opts,
+                )
+            }
         }
 
         Command::PushTags {
@@ -364,24 +459,27 @@ pub fn run_for_revset(
             Ok(ExitCode::from(2))
         }
         Some(outcome) => {
-            if let Some(commit) = &outcome.fixup_commit {
-                if outcome.success && outcome.retried {
-                    eprintln!(
-                        "jj-hooks: hooks modified files; re-run on fixup commit was clean \
-                         (fixup {commit})"
-                    );
-                } else {
-                    eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
-                }
-            } else if outcome.success && outcome.initial_failure {
-                eprintln!("jj-hooks: initial hook run reported a failure");
-            }
+            report_run_outcome(&outcome);
             if outcome.success && outcome.fixup_commit.is_none() {
                 Ok(ExitCode::SUCCESS)
             } else {
                 Ok(ExitCode::from(1))
             }
         }
+    }
+}
+
+fn report_run_outcome(outcome: &hooks::HookOutcome) {
+    if let Some(commit) = &outcome.fixup_commit {
+        if outcome.success && outcome.retried {
+            eprintln!(
+                "jj-hooks: hooks modified files; re-run on fixup commit was clean (fixup {commit})"
+            );
+        } else {
+            eprintln!("jj-hooks: hooks modified files (fixup commit {commit})");
+        }
+    } else if outcome.success && outcome.initial_failure {
+        eprintln!("jj-hooks: initial hook run reported a failure");
     }
 }
 
@@ -458,13 +556,7 @@ pub fn run_for_revset_outcome(
     ])?;
     let parent = parent.trim().to_owned();
 
-    let update = bookmark_updates::BookmarkUpdate {
-        remote: "<local>".into(),
-        bookmark: format!("revset:{revset}"),
-        update_type: bookmark_updates::UpdateType::MoveForward,
-        old_commit: Some(parent),
-        new_commit: Some(target.to_owned()),
-    };
+    let update = bookmark_updates::BookmarkUpdate::revset(revset, parent, target.to_owned());
 
     let primary_git_dir = jj::primary_git_dir(workspace_root)?;
     let outcome = hooks::run_for_update(
