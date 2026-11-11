@@ -8,6 +8,9 @@ All notable changes to jj-hooks are tracked here.
 
 - Host-wide concurrent gate slots, configurable with `jj-hooks.gate-slots` or
   `JJ_HOOKS_GATE_SLOTS`, with a bounded wait timeout.
+- Nix flake exposes `packages.<system>.jj-hooks-bin`, which repacks the
+  published v0.6.0 release binaries, pinned by hash in `nix/release-assets.nix`,
+  for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
 
 ### Fixed
 

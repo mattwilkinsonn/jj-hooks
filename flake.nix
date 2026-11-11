@@ -50,6 +50,8 @@
         hkFlake = if system == "x86_64-darwin" then hk-darwin else hk;
         pkgs = import (if system == "x86_64-darwin" then nixpkgs-darwin else nixpkgs) { inherit system; };
         jjHooks = packageFor pkgs system hkFlake;
+        jjHooksBin = pkgs.callPackage ./nix/package-bin.nix { };
+        hasReleaseBin = builtins.hasAttr system (import ./nix/release-assets.nix).assets;
         app = binary: {
           type = "app";
           program = "${jjHooks}/bin/${binary}";
@@ -59,6 +61,9 @@
         packages = {
           jj-hooks = jjHooks;
           default = jjHooks;
+        }
+        // nixpkgs.lib.optionalAttrs hasReleaseBin {
+          jj-hooks-bin = jjHooksBin;
         };
 
         apps = {
@@ -67,9 +72,11 @@
           jj-hooks = app "jj-hooks";
         };
 
-        # The package derivation runs the Cargo suite and then smoke-tests both
-        # installed binaries with --help and --version.
-        checks.package = jjHooks;
+        checks = {
+          # The package derivation runs the Cargo suite and then smoke-tests both
+          # installed binaries with --help and --version.
+          package = jjHooks;
+        };
       }
     );
 }

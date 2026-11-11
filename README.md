@@ -147,6 +147,8 @@ This adds `jj-hooks` to the current Nix profile without replacing installations
 from other methods. To remove it, find its entry with `nix profile list` and
 remove that entry with `nix profile remove <index>`.
 
+To install the published release binaries instead of building from source, run `nix profile install github:mattwilkinsonn/jj-hooks#jj-hooks-bin`. It fetches the pinned release asset for your platform (`aarch64-darwin`, `x86_64-linux` or `aarch64-linux`). CI fails if its build graph contains the Rust toolchain or a source build of jj-hooks.
+
 Removing the package does not revert optional configuration from `jj-hp init`.
 Remove only the user-level jj settings you chose to add; remove jjui actions and
 bindings from the jjui config manually. `jj new <exact-hash>` changes the jj
