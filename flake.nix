@@ -72,11 +72,9 @@
           jj-hooks = app "jj-hooks";
         };
 
-        checks = {
-          # The package derivation runs the Cargo suite and then smoke-tests both
-          # installed binaries with --help and --version.
-          package = jjHooks;
-        };
+        # The package derivation runs the Cargo suite and then smoke-tests both
+        # installed binaries with --help and --version.
+        checks.package = jjHooks;
       }
     );
 }
