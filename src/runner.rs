@@ -275,13 +275,9 @@ fn which_in_path(bin: &str, path: Option<&OsStr>, cwd: &Path) -> PathLookup {
         } else {
             cwd.join(dir).join(bin)
         };
-        if !is_executable(&candidate) {
-            continue;
-        }
-        if candidate.to_str().is_some() {
+        if is_executable(&candidate) {
             return PathLookup::Found(candidate);
         }
-        non_utf8_candidate.get_or_insert(candidate);
     }
     non_utf8_candidate.map_or(PathLookup::NotFound, PathLookup::NonUtf8Candidate)
 }
