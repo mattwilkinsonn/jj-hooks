@@ -412,3 +412,44 @@ email = "tests@jj-hooks.invalid"
         show(&out)
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn resolver_finds_runner_on_repo_env_patched_path_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    repo.write_hk_config("// test runner config\n");
+    let child_bin = repo.tmp.path().join("patched-bin");
+    std::fs::create_dir(&child_bin).unwrap();
+    let marker = repo.tmp.path().join("patched-runner");
+    let runner = child_bin.join("hk");
+    std::fs::write(
+        &runner,
+        format!("#!/bin/sh\nprintf invoked > '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    repo.write(
+        ".envrc",
+        &format!("export PATH='{}'\n", child_bin.display()),
+    );
+    repo.write("new.txt", "x\n");
+    let out = repo.jj(&["commit", "-m", "patched runner"]);
+    assert!(out.status.success(), "{}", show(&out));
+    let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    assert!(out.status.success(), "{}", show(&out));
+
+    let direnv = format!(
+        "#!/bin/sh\nprintf '%s' '{{\"PATH\":\"{}\"}}'\n",
+        child_bin.display()
+    );
+    let out = repo.jj_hooks_with_path_allowlist_and_extras(
+        &["--runner", "hk", "push", "-b", "main"],
+        &["bash", "git", "jj", "sh"],
+        &[("direnv", direnv.as_str())],
+    );
+    assert!(out.status.success(), "{}", show(&out));
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "invoked");
+}
