@@ -441,9 +441,14 @@ fn resolver_finds_runner_on_repo_env_patched_path_only() {
     let out = repo.jj(&["bookmark", "set", "main", "-r", "@-"]);
     assert!(out.status.success(), "{}", show(&out));
 
-    let out = repo.jj_hooks_with_path_allowlist(
+    let direnv = format!(
+        "#!/bin/sh\nprintf '%s' '{{\"PATH\":\"{}\"}}'\n",
+        child_bin.display()
+    );
+    let out = repo.jj_hooks_with_path_allowlist_and_extras(
         &["--runner", "hk", "push", "-b", "main"],
-        &["bash", "direnv", "git", "jj", "sh"],
+        &["bash", "git", "jj", "sh"],
+        &[("direnv", direnv.as_str())],
     );
     assert!(out.status.success(), "{}", show(&out));
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "invoked");
