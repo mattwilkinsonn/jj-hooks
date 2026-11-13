@@ -1956,6 +1956,7 @@ mod tests {
             workspace.path(),
             workspace.path(),
             None,
+            false,
         )
         .unwrap();
         assert_eq!(std::fs::read_to_string(output).unwrap(), "patched");
@@ -1971,6 +1972,7 @@ mod tests {
             cwd.path(),
             workspace.path(),
             None,
+            false,
         )
         .unwrap_err();
 
@@ -1996,6 +1998,7 @@ mod tests {
             cwd.path(),
             workspace.path(),
             Some(&mut captured),
+            false,
         )
         .unwrap_err();
 
@@ -2065,8 +2068,14 @@ mod tests {
         std::fs::remove_file(&executable).unwrap();
 
         let mut captured = String::new();
-        let error =
-            run_subprocess(&argv, child.path(), workspace.path(), Some(&mut captured)).unwrap_err();
+        let error = run_subprocess(
+            &argv,
+            child.path(),
+            workspace.path(),
+            Some(&mut captured),
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(
             &error,
             JjHooksError::Spawn { argv0, cwd: spawn_cwd, source }

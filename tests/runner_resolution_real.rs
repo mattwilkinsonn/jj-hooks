@@ -431,7 +431,10 @@ fn resolver_finds_runner_on_repo_env_patched_path_only() {
     .unwrap();
     std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    repo.write(".envrc", &format!("export PATH='{}'\n", child_bin.display()));
+    repo.write(
+        ".envrc",
+        &format!("export PATH='{}'\n", child_bin.display()),
+    );
     repo.write("new.txt", "x\n");
     let out = repo.jj(&["commit", "-m", "patched runner"]);
     assert!(out.status.success(), "{}", show(&out));
