@@ -20,6 +20,7 @@
 //! See `docs/designs/tools/jj-hp-devenv-hook-env.md`.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -155,6 +156,44 @@ pub(crate) fn apply_repo_env_with_policy(
             }
         }
     }
+}
+
+/// Return the PATH the child receives after applying the cached repo env.
+///
+/// The source label is used when reporting a missing hook runner. A PATH
+/// removal is distinct from an inherited PATH: it must not fall back to the
+/// parent's executable search path.
+pub(crate) fn effective_path(workspace_root: &Path) -> (Option<OsString>, &'static str) {
+    effective_path_from(workspace_root, || std::env::var_os("PATH"))
+}
+
+fn effective_path_from(
+    workspace_root: &Path,
+    inherited_path: impl FnOnce() -> Option<OsString>,
+) -> (Option<OsString>, &'static str) {
+    let key = cache_key(workspace_root);
+    let patch = {
+        let guard = cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.get(&key).map(Arc::clone)
+    };
+    match patch.as_deref() {
+        Some(EnvPatch::Patch(map)) => match map.get("PATH") {
+            Some(Some(path)) => (Some(path.into()), "repo-env PATH patch"),
+            Some(None) => (None, "PATH removed by repo-env patch"),
+            None => (inherited_path(), "inherited PATH"),
+        },
+        Some(EnvPatch::Disabled) | None => (inherited_path(), "inherited PATH"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn effective_path_with_parent(
+    workspace_root: &Path,
+    parent_path: Option<&std::ffi::OsStr>,
+) -> (Option<OsString>, &'static str) {
+    effective_path_from(workspace_root, || parent_path.map(OsString::from))
 }
 
 /// Strip the git repo-location env family (`GIT_DIR`, `GIT_INDEX_FILE`,
@@ -595,6 +634,58 @@ pub(crate) fn test_seed(workspace_root: &Path, patch: EnvPatch) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn seed_path_patch(workspace_root: &Path, value: Option<&str>) {
+        test_seed(
+            workspace_root,
+            EnvPatch::Patch(HashMap::from([(
+                "PATH".to_owned(),
+                value.map(str::to_owned),
+            )])),
+        );
+    }
+
+    #[test]
+    fn effective_path_uses_seeded_path_and_removal_patches() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let parent = std::ffi::OsStr::new("/parent/bin");
+
+        seed_path_patch(workspace.path(), Some("/repo/bin"));
+        assert_eq!(
+            effective_path_with_parent(workspace.path(), Some(parent)),
+            (Some(OsString::from("/repo/bin")), "repo-env PATH patch")
+        );
+
+        seed_path_patch(workspace.path(), None);
+        assert_eq!(
+            effective_path_with_parent(workspace.path(), Some(parent)),
+            (None, "PATH removed by repo-env patch")
+        );
+    }
+
+    #[test]
+    fn effective_path_uses_parent_for_inherited_and_disabled_patches() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let parent = std::ffi::OsStr::new("/parent/bin");
+
+        test_seed(
+            workspace.path(),
+            EnvPatch::Patch(HashMap::from([(
+                "MARKER".to_owned(),
+                Some("set".to_owned()),
+            )])),
+        );
+        assert_eq!(
+            effective_path_with_parent(workspace.path(), Some(parent)),
+            (Some(OsString::from(parent)), "inherited PATH")
+        );
+
+        test_seed(workspace.path(), EnvPatch::Disabled);
+        assert_eq!(
+            effective_path_with_parent(workspace.path(), Some(parent)),
+            (Some(OsString::from(parent)), "inherited PATH")
+        );
+    }
 
     /// Write an executable fake `direnv` (a POSIX shell script) into `dir`.
     fn write_fake_direnv(dir: &Path, body: &str) -> PathBuf {

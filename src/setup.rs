@@ -407,6 +407,32 @@ mod tests {
     }
 
     #[test]
+    fn run_steps_contextualizes_spawn_failure() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let worktree = tempfile::TempDir::new().unwrap();
+        let missing = worktree.path().join("missing-runner");
+        let missing_argv = missing.display().to_string();
+        let step = SetupStep {
+            name: Some("missing setup".into()),
+            run: vec![missing_argv.clone()],
+        };
+
+        let error = run_steps(&[step], worktree.path(), workspace.path()).unwrap_err();
+        assert!(matches!(
+            &error,
+            JjHooksError::Spawn { argv0, cwd, source }
+                if argv0 == &missing_argv
+                    && cwd == worktree.path()
+                    && source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains(worktree.path().to_str().unwrap())
+        );
+    }
+
+    #[test]
     fn run_steps_returns_captured_output_on_success() {
         // Success path should still return the captured bytes so the
         // caller can fold them into the per-bookmark buffer when

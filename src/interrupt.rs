@@ -340,15 +340,23 @@ pub(crate) fn cleanup_output(cmd: &mut Command) -> Result<Output> {
 #[cfg(not(unix))]
 fn run(cmd: &mut Command, mode: Mode) -> Result<Output> {
     if mode == Mode::Status {
-        let status = cmd.status()?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|error| crate::error::spawn_error(cmd, error))?;
+        let status = child.wait()?;
         return Ok(Output {
             status,
             stdout: Vec::new(),
             stderr: Vec::new(),
         });
     }
-    cmd.stdin(std::process::Stdio::null());
-    Ok(cmd.output()?)
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = cmd
+        .spawn()
+        .map_err(|error| crate::error::spawn_error(cmd, error))?;
+    Ok(child.wait_with_output()?)
 }
 
 #[cfg(unix)]
@@ -385,7 +393,9 @@ fn spawn(cmd: &mut Command, mode: Mode) -> Result<Spawned> {
     if mode.checks() {
         check()?;
     }
-    let mut child = cmd.spawn()?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| crate::error::spawn_error(cmd, error))?;
     let pid = Pid::from_child(&child);
     state.children.push(Tracked {
         pid,
