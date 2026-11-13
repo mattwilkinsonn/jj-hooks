@@ -300,7 +300,7 @@ fn resolve_on_path(
         path_source,
     })
 }
-
+/// Reject lossy PATH conversions before returning an executable argv.
 fn validate_path_entries_utf8(path: Option<&OsStr>) -> Result<()> {
     if let Some(path) = path {
         for entry in std::env::split_paths(path) {
@@ -314,6 +314,7 @@ fn validate_path_entries_utf8(path: Option<&OsStr>) -> Result<()> {
     }
     Ok(())
 }
+
 /// Resolve a hook runner to an argv prefix.
 ///
 /// The prefix replaces the bare runner name when building the hook command.
@@ -372,8 +373,8 @@ pub(crate) fn resolve_runner_argv_for_cwd(
 
     // Resolve from the same environment patch that the child command receives.
     let (effective_path, path_source) = crate::repo_env::effective_path(workspace_root);
-    // Use the child's effective PATH for lookup. The project flag must point
-    // at workspace_root because the ephemeral worktree has no `.venv`.
+    validate_path_entries_utf8(effective_path.as_deref())?;
+    // The project flag must point at workspace_root because the ephemeral worktree has no `.venv`.
     if matches!(runner, Runner::PreCommit | Runner::Prek)
         && workspace_root.join("uv.lock").exists()
         && let Some(uv) = which_in_path("uv", effective_path.as_deref(), child_cwd)
@@ -627,8 +628,8 @@ mod tests {
         );
     }
 
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn resolve_runner_rejects_non_utf8_path_entry_without_spawning() {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::PermissionsExt;
@@ -672,7 +673,6 @@ mod tests {
                     && message.contains("not valid UTF-8")
         ));
     }
-
     #[test]
     #[cfg(unix)]
     fn resolver_spawns_patched_only_runner_and_rejects_removed_path() {
