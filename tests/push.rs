@@ -13,7 +13,6 @@ use harness::{
     PRE_PUSH_RECORD_RANGE, TestRepo, show,
 };
 
-
 /// Sanity: harness builds a working primary + remote and `jj git push` works
 /// directly. If this fails the rest of the tests are noise.
 #[test]
