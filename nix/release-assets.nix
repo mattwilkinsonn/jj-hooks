@@ -2,7 +2,7 @@
 # the SRI form of the asset's published .sha256 sidecar; bump the version and
 # convert the three new digests with `nix hash convert --hash-algo sha256 --to sri`.
 let
-  version = "0.6.0";
+  version = "0.7.0";
 in
 {
   inherit version;
@@ -13,7 +13,7 @@ in
       in
       {
         name = "jj-hooks-v${version}-${slug}.tar.gz";
-        hash = "sha256-PL9xtMrRjyMtmyg68eyMOrbHP4ZXF7/oJFNtrwBsYhQ=";
+        hash = "sha256-b+Gu4+OPmjqmsj0hwZrNf4gCc9iQlTh2bXfuzbXQPoE=";
       };
     aarch64-linux =
       let
@@ -21,7 +21,7 @@ in
       in
       {
         name = "jj-hooks-v${version}-${slug}.tar.gz";
-        hash = "sha256-dcHEXW7E9kY5nMQVFOrgWwwAGqajxenslYzbnMX4sJI=";
+        hash = "sha256-X6ebxSQ/bvpUlOV1rFJGvUUDT7w58CYbi7sITmh7uU8=";
       };
     aarch64-darwin =
       let
@@ -29,7 +29,7 @@ in
       in
       {
         name = "jj-hooks-v${version}-${slug}.tar.gz";
-        hash = "sha256-NXBXBOnhYYB8lffzO/4YbbLxqVf1tYDfCxEdwMNzyDk=";
+        hash = "sha256-ArFKXQhjFkRSGibCdfhJjnF8JUlD4tEdulZIwjFVuQw=";
       };
   };
 }
