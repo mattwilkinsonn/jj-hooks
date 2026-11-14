@@ -380,21 +380,24 @@ structured error naming the missing binary instead of a libc-level
      the resolved binary; pre-commit is invoked as a module).
    Both shapes are handled.
 
-3. **`uv run` wrapping.** When `workspace_root/uv.lock` exists *and*
-   `uv` is on `$PATH`, prek / pre-commit invocations are prefixed with
-   `uv run --project <workspace_root> --`. uv resolves the project's
-   venv automatically; you don't have to activate anything. The
-   `--project` flag points uv at your actual workspace rather than
-   the ephemeral worktree jj-hp runs the hook in (since `.venv` is
-   typically gitignored and wouldn't exist in the worktree). Only
-   applies to prek / pre-commit (lefthook / hk aren't Python tools).
+3. **`uv run` wrapping.** When `workspace_root/uv.lock` exists and `uv` is
+   available on the effective child PATH, prek / pre-commit invocations are
+   prefixed with `uv run --project <workspace_root> --`. This uses the real
+   workspace because its `.venv` is typically absent from the ephemeral worktree.
 
-4. **`$PATH`.** The classic fallback — bare program name found via the
-   shell's PATH walk.
+4. **Effective child PATH.** Runner and `uv` lookup use repo-env's PATH patch
+   when it sets PATH, otherwise inherited PATH; a removed PATH stays removed.
+   Relative and empty entries resolve against the ephemeral worktree cwd. jj-hp
+   selects the matching executable before spawn.
 
-If you see `hook runner ‹bin› is not on $PATH`, none of the four layers
-matched. Either install the runner globally (`brew install prek`,
-`pipx install prek`, `uv tool install prek`), activate your venv
+If the only executable match has a non-UTF-8 path, jj-hp reports that path
+instead of replacing it with a lossy argv0. Use a UTF-8 path or an explicit
+wrapper.
+
+If the error says `hook runner ‹bin› could not be resolved`, no configured
+layer matched. Runner lookup uses the effective child PATH, which may differ
+from the PATH visible to `jj-hp`. Install the runner globally (`brew install
+prek`, `pipx install prek`, or `uv tool install prek`), activate your venv
 before invoking `jj-hp`, or set `jj-hooks.runner-bin.<runner>`.
 
 ## Repo environment (direnv / devenv)
