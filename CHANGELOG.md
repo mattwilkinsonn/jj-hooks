@@ -10,10 +10,13 @@ All notable changes to jj-hooks are tracked here.
 
 ### Added
 
-- `jj-hp run --from <rev> --to <rev>` runs hooks over a commit range, and
-  `--result-json <path>` writes the outcome for a calling tool.
+- `jj-hp run --from <commit-id> --to <commit-id>` (full 40-hex commit IDs) runs
+  hooks over an exact diff range, and `--result-json <path>` (requires `--from`
+  and `--to`) writes the outcome for a calling tool.
 - Host-wide concurrent gate slots, configurable with `jj-hooks.gate-slots` or
-  `JJ_HOOKS_GATE_SLOTS`, with a bounded wait timeout.
+  `JJ_HOOKS_GATE_SLOTS`. The cap is on by default (half the CPU count, at least
+  one). A waiting gate fails after `jj-hooks.gate-slot-timeout` or
+  `JJ_HOOKS_GATE_SLOT_TIMEOUT`, one hour by default.
 - Nix flake exposes `packages.<system>.jj-hooks`, built from source on four
   platforms, and `packages.<system>.jj-hooks-bin`, which repacks a published
   release pinned by hash in `nix/release-assets.nix`, for `x86_64-linux`,
