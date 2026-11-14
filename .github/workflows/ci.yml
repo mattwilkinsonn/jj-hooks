@@ -9,3 +9,53 @@ jobs:
     permissions:
       contents: read
       id-token: write # the Determinate Nix action needs OIDC
+
+  # Proves the release-asset flake package is a repack: it evaluates, builds from
+  # the pinned tarball, and its build graph holds no rustc, cargo or source drv.
+  nix-release-bin:
+    name: nix release bin (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runs_on: ubuntu-latest
+          - system: aarch64-linux
+            runs_on: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runs_on: macos-latest
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # the Determinate Nix action needs OIDC
+    env:
+      SYSTEM: ${{ matrix.system }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: DeterminateSystems/determinate-nix-action@527f17dd63d2d60d3e5552934bc84b9a33a14d11 # v3.22.2
+
+      - name: Evaluate the flake
+        run: nix flake check --no-build
+
+      - name: Build the release repack
+        run: nix build --no-link ".#packages.${SYSTEM}.jj-hooks-bin"
+
+      - name: Assert no Rust toolchain or source build in the build graph
+        run: |
+          set -euo pipefail
+          pattern='-(rustc|cargo)-[0-9]|-jj-hooks-[0-9][^/]*\.drv$'
+          for attr in jj-hooks jj-hooks-bin; do
+            drv="$(nix eval --raw ".#packages.${SYSTEM}.${attr}.drvPath")"
+            nix-store --query --requisites "$drv" > "$RUNNER_TEMP/$attr.requisites"
+          done
+          # Positive control: the source build must match, or the detector is blind.
+          if ! grep -qE -- "$pattern" "$RUNNER_TEMP/jj-hooks.requisites"; then
+            echo "error: detector missed the source build of jj-hooks" >&2
+            exit 1
+          fi
+          if grep -qE -- "$pattern" "$RUNNER_TEMP/jj-hooks-bin.requisites"; then
+            echo "error: jj-hooks-bin would compile from source" >&2
+            exit 1
+          fi
