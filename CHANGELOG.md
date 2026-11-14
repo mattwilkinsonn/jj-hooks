@@ -4,13 +4,20 @@ All notable changes to jj-hooks are tracked here.
 
 ## [Unreleased]
 
+## [0.7.0]
+
+`jj-hp run` takes a commit range and writes a result file; gate runs share host-wide slots.
+
 ### Added
 
+- `jj-hp run --from <rev> --to <rev>` runs hooks over a commit range, and
+  `--result-json <path>` writes the outcome for a calling tool.
 - Host-wide concurrent gate slots, configurable with `jj-hooks.gate-slots` or
   `JJ_HOOKS_GATE_SLOTS`, with a bounded wait timeout.
-- Nix flake exposes `packages.<system>.jj-hooks-bin`, which repacks the
-  published v0.6.0 release binaries, pinned by hash in `nix/release-assets.nix`,
-  for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
+- Nix flake exposes `packages.<system>.jj-hooks`, built from source on four
+  platforms, and `packages.<system>.jj-hooks-bin`, which repacks a published
+  release pinned by hash in `nix/release-assets.nix`, for `x86_64-linux`,
+  `aarch64-linux` and `aarch64-darwin`.
 
 ### Fixed
 
