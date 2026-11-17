@@ -26,7 +26,7 @@ use crate::runner::{
     Runner, Stage, hook_command, hook_command_all_files, lefthook_command,
     lefthook_command_all_files,
 };
-use crate::setup;
+use crate::setup::{self, SetupStep};
 use crate::worktree::Worktree;
 
 /// Cooperative cancellation handle for parallel hook runs.
@@ -153,36 +153,6 @@ pub fn run_for_update(
     update: &BookmarkUpdate,
     opts: RunOpts,
 ) -> Result<HookOutcome> {
-    let mut result = RunResult::new(
-        update.old_commit.as_deref().unwrap_or_default(),
-        update.new_commit.as_deref().unwrap_or_default(),
-    );
-    run_for_update_with_result(
-        jj,
-        primary_git_dir,
-        workspace_root,
-        cli_runner,
-        stage,
-        update,
-        opts,
-        &mut result,
-        false,
-    )
-}
-
-/// Run one update and record its first pass in the caller-owned result.
-#[allow(clippy::too_many_arguments)]
-pub fn run_for_update_with_result(
-    jj: &JjCli,
-    primary_git_dir: &Path,
-    workspace_root: &Path,
-    cli_runner: Option<Runner>,
-    stage: Stage,
-    update: &BookmarkUpdate,
-    opts: RunOpts,
-    result: &mut RunResult,
-    preserve_gate_env: bool,
-) -> Result<HookOutcome> {
     let worktree_root = crate::worktree::worktree_root(jj);
     // Compute the repo's devenv/direnv env ONCE, eagerly, before any
     // worktree/spawn. The returned Arc is intentionally discarded — the
@@ -207,8 +177,6 @@ pub fn run_for_update_with_result(
         opts,
         &Cancel::never(),
         None,
-        result,
-        preserve_gate_env,
     );
     crate::interrupt::check()?;
     outcome
@@ -237,8 +205,6 @@ fn run_for_update_with_cancel(
     opts: RunOpts,
     cancel: &Cancel,
     warm: Option<&PklWarmCache>,
-    result: &mut RunResult,
-    preserve_gate_env: bool,
 ) -> Result<HookOutcome> {
     let Some(new_commit) = update.new_commit.as_ref() else {
         // Pure delete — nothing to check.
@@ -251,6 +217,7 @@ fn run_for_update_with_cancel(
             cancelled: false,
         });
     };
+
     let diff_base = resolve_from_refs(jj, update)?;
     let setup_steps = setup::load_steps(jj)?;
 
@@ -263,14 +230,12 @@ fn run_for_update_with_cancel(
         stage,
         update,
         new_commit,
+        &diff_base,
+        &setup_steps,
         opts.all_files,
         opts.capture_output,
         cancel,
         warm,
-        result,
-        &diff_base,
-        &setup_steps,
-        preserve_gate_env,
     )?;
 
     // Initial run was clean OR caller opted out of retry OR there's nothing
@@ -291,7 +256,6 @@ fn run_for_update_with_cancel(
     tracing::info!(
         "{update}: re-running hooks against fixup commit {fixup} to check for transient failure"
     );
-    let mut retry_result = RunResult::new(update.old_commit.as_deref().unwrap_or_default(), fixup);
     let retry = run_once(
         jj,
         primary_git_dir,
@@ -301,14 +265,12 @@ fn run_for_update_with_cancel(
         stage,
         update,
         fixup,
+        &diff_base,
+        &setup_steps,
         opts.all_files,
         opts.capture_output,
         cancel,
         warm,
-        &mut retry_result,
-        &diff_base,
-        &setup_steps,
-        preserve_gate_env,
     )?;
 
     // The retry should be clean (no failure, no new fixup) for the
@@ -505,8 +467,6 @@ where
         updates,
         opts.capture_output,
         |_idx, update, cancel| {
-            let mut unused_result = RunResult::new("", "");
-            let preserve_gate_env = false;
             run_for_update_with_cancel(
                 jj,
                 primary_git_dir,
@@ -518,8 +478,6 @@ where
                 opts,
                 cancel,
                 Some(warm),
-                &mut unused_result,
-                preserve_gate_env,
             )
         },
         progress_start,
@@ -641,8 +599,6 @@ where
         partitions,
         opts.capture_output,
         |_p_idx, _u_idx, update, cancel| {
-            let mut unused_result = RunResult::new("", "");
-            let preserve_gate_env = false;
             run_for_update_with_cancel(
                 jj,
                 primary_git_dir,
@@ -654,8 +610,6 @@ where
                 opts,
                 cancel,
                 Some(warm),
-                &mut unused_result,
-                preserve_gate_env,
             )
         },
         progress_start,
@@ -802,39 +756,6 @@ fn splice_runner_prefix(prefix: &[String], command_argv: &[String]) -> Vec<Strin
     out
 }
 
-/// Phase reached by the first pass.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Phase {
-    ToolFailed,
-    NoConfig,
-    SetupFailed,
-    RunnerCompleted,
-    Fixup,
-}
-
-#[derive(serde::Serialize)]
-pub struct RunResult {
-    phase: Phase,
-    exit: i32,
-    from: String,
-    to: String,
-    config: Option<String>,
-    fixup: Option<String>,
-}
-
-impl RunResult {
-    pub fn new(from: &str, to: &str) -> Self {
-        Self {
-            phase: Phase::ToolFailed,
-            exit: 1,
-            from: from.into(),
-            to: to.into(),
-            config: None,
-            fixup: None,
-        }
-    }
-}
 /// One pass through the hook pipeline against a specific target commit.
 ///
 /// Builds a fresh worktree at `target_commit`, runs the hook backend
@@ -862,14 +783,12 @@ fn run_once(
     stage: Stage,
     update: &BookmarkUpdate,
     target_commit: &str,
+    diff_base: &DiffBase,
+    setup_steps: &[SetupStep],
     all_files: bool,
     capture_output: bool,
     cancel: &Cancel,
     warm: Option<&PklWarmCache>,
-    result: &mut RunResult,
-    diff_base: &DiffBase,
-    setup_steps: &[setup::SetupStep],
-    preserve_gate_env: bool,
 ) -> Result<OnceOutcome> {
     crate::interrupt::check()?;
     if cancel.is_cancelled() {
@@ -903,7 +822,6 @@ fn run_once(
         });
     };
     let wt = Worktree::create(worktree_root, primary_git_dir, target_commit)?;
-    result.config = cli_runner.and_then(|r| r.config_path(wt.path()));
 
     // User-declared setup commands (e.g. `bun install`) run inside
     // the worktree before the runner so hooks have install-time
@@ -924,12 +842,7 @@ fn run_once(
     // The captured setup output rides along on the `captured_output`
     // field so it shows up in the same dump the user already sees
     // for a hook failure.
-    let setup_captured = match setup::run_steps_with_policy(
-        setup_steps,
-        wt.path(),
-        workspace_root,
-        preserve_gate_env,
-    ) {
+    let setup_captured = match setup::run_steps(setup_steps, wt.path(), workspace_root) {
         Ok(captured) => captured,
         Err(JjHooksError::SetupFailed {
             name,
@@ -947,8 +860,6 @@ fn run_once(
                 "setup step `{name}` exited with status {status}; \
                  skipping hook runner for this bookmark\n",
             ));
-            result.phase = Phase::SetupFailed;
-            result.exit = 0;
             return Ok(OnceOutcome {
                 success: false,
                 fixup_commit: None,
@@ -967,8 +878,6 @@ fn run_once(
         Some(r) => r,
         None => {
             let Some(r) = Runner::autodetect(wt.path())? else {
-                result.exit = 0;
-                result.phase = Phase::NoConfig;
                 eprintln!(
                     "jj-hooks: {update}: no hook-runner config in target commit; skipping hooks"
                 );
@@ -1000,7 +909,6 @@ fn run_once(
             crate::runner::prefer_prek_when_available(r, prek_present)
         }
     };
-    result.config = runner.config_path(wt.path());
 
     // Resolve runner availability using the environment the child will see;
     // missing runners report the name and effective PATH source instead of
@@ -1054,7 +962,6 @@ fn run_once(
         DiffBase::AllFiles => &[],
     };
     let mut success = true;
-    let mut runner_exit = 0;
     // Seed the captured buffer with the setup-step output when the
     // caller asked us to capture. Setup output is always captured
     // inside `run_steps` (it has to be, to attach it to a
@@ -1078,14 +985,10 @@ fn run_once(
             };
             let argv = splice_runner_prefix(&runner_argv, &argv);
             tracing::info!("running (--all-files): {:?}", argv);
-            let code = run_subprocess(
-                &argv,
-                wt.path(),
-                workspace_root,
-                captured.as_mut(),
-                preserve_gate_env,
-            )?;
-            record_runner_exit(&mut runner_exit, &mut success, code);
+            let ok = run_subprocess(&argv, wt.path(), workspace_root, captured.as_mut())?;
+            if !ok {
+                success = false;
+            }
         }
     } else {
         for from_ref in from_refs {
@@ -1111,14 +1014,10 @@ fn run_once(
             let argv = splice_runner_prefix(&runner_argv, &argv);
 
             tracing::info!("running: {:?}", argv);
-            let code = run_subprocess(
-                &argv,
-                wt.path(),
-                workspace_root,
-                captured.as_mut(),
-                preserve_gate_env,
-            )?;
-            record_runner_exit(&mut runner_exit, &mut success, code);
+            let ok = run_subprocess(&argv, wt.path(), workspace_root, captured.as_mut())?;
+            if !ok {
+                success = false;
+            }
         }
     }
 
@@ -1145,19 +1044,6 @@ fn run_once(
     }
 
     crate::interrupt::check()?;
-    if !cancelled {
-        result.phase = if fixup_commit.is_some() {
-            Phase::Fixup
-        } else {
-            Phase::RunnerCompleted
-        };
-        result.exit = if fixup_commit.is_some() {
-            0
-        } else {
-            runner_exit
-        };
-        result.fixup.clone_from(&fixup_commit);
-    }
     Ok(OnceOutcome {
         success,
         fixup_commit,
@@ -1205,13 +1091,6 @@ fn forget_fixup(jj: &JjCli, primary_git_dir: &Path, bookmark: &str) {
     }
 }
 
-fn record_runner_exit(first_exit: &mut i32, success: &mut bool, code: i32) {
-    if *first_exit == 0 {
-        *first_exit = code;
-    }
-    *success &= code == 0;
-}
-
 /// Run a hook subprocess. When `capture` is `Some`, the child's
 /// stdout+stderr are captured into the buffer (chronological order is
 /// approximated by concatenating stdout then stderr — the runner CLIs
@@ -1220,20 +1099,20 @@ fn record_runner_exit(first_exit: &mut i32, success: &mut bool, code: i32) {
 /// `capture` is `None`, the child inherits stdio so the user sees the
 /// runner's progress bar live.
 ///
-/// Returns the exit code; signal termination and IO errors are tool failures.
+/// Returns `Ok(true)` on a zero exit, `Ok(false)` on any non-zero
+/// exit. IO errors (spawn failure, etc.) propagate as `Err`.
 fn run_subprocess(
     argv: &[String],
     cwd: &Path,
     workspace_root: &Path,
     capture: Option<&mut String>,
-    preserve_gate_env: bool,
-) -> Result<i32> {
+) -> Result<bool> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(cwd);
     // Merge the repo's direnv/devenv env (once-computed, cached) BEFORE
     // JJ_HOOKS_WORKSPACE so that variable always wins. No-op unless a batch
     // entrypoint populated the cache for this workspace_root.
-    crate::repo_env::apply_repo_env_with_policy(&mut cmd, workspace_root, preserve_gate_env);
+    crate::repo_env::apply_repo_env(&mut cmd, workspace_root);
     // Point CARGO_TARGET_DIR at the primary `target/` AFTER apply_repo_env so
     // a repo-env-carried value can never win. No-op unless enabled.
     crate::gate_cache::apply_gate_cache(&mut cmd, workspace_root);
@@ -1242,9 +1121,7 @@ fn run_subprocess(
         None => {
             let status = crate::interrupt::status(&mut cmd)
                 .map_err(|error| crate::error::spawn_context(error, &argv[0], cwd))?;
-            status
-                .code()
-                .ok_or_else(|| std::io::Error::other("hook runner terminated by signal").into())
+            Ok(status.success())
         }
         Some(buf) => {
             let output = crate::interrupt::output(&mut cmd)
@@ -1260,10 +1137,7 @@ fn run_subprocess(
             if !buf.ends_with('\n') {
                 buf.push('\n');
             }
-            output
-                .status
-                .code()
-                .ok_or_else(|| std::io::Error::other("hook runner terminated by signal").into())
+            Ok(output.status.success())
         }
     }
 }
@@ -1848,8 +1722,8 @@ mod tests {
             "printf 'MARK=[%s]' \"${REPO_ENV_MARKER:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        let code = run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
-        assert_eq!(code, 0);
+        let ok = run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
+        assert!(ok);
         // RED before T2: run_subprocess set only JJ_HOOKS_WORKSPACE, so the
         // child saw `unset` and this assertion failed.
         assert!(buf.contains("MARK=[applied]"), "captured: {buf:?}");
@@ -1874,7 +1748,7 @@ mod tests {
             "printf 'GD=[%s]' \"${GIT_DIR:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
+        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
         assert!(buf.contains("GD=[unset]"), "captured: {buf:?}");
     }
 
@@ -1898,7 +1772,7 @@ mod tests {
             "printf 'GD=[%s]' \"${GIT_DIR:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
+        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
         unsafe {
             std::env::remove_var("GIT_DIR");
         }
@@ -1921,7 +1795,7 @@ mod tests {
             "printf 'WS=[%s]' \"${JJ_HOOKS_WORKSPACE:-unset}\"".to_string(),
         ];
         let mut buf = String::new();
-        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf), false).unwrap();
+        run_subprocess(&argv, ws.path(), ws.path(), Some(&mut buf)).unwrap();
         assert!(
             buf.contains(&format!("WS=[{}]", ws.path().display())),
             "captured: {buf:?}"

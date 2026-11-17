@@ -25,13 +25,6 @@ they're identical.
 `jj-hp run [REVSET]` runs hooks against a revset without pushing — useful for
 "lint this change before I move on" workflows.
 
-`jj-hp run --from <40-hex> --to <40-hex> --result-json <path>` atomically
-writes first-pass evidence, even when a fixup triggers a retry. Phases are
-`no-config`, `setup-failed`, `runner-completed`, `fixup`, and `tool-failed`;
-only `runner-completed` carries a runner exit code. An unusable result path
-prevents the run. Failure to start or abrupt termination can leave no result.
-Use `--no-retry-after-fixup` to disable retry.
-
 ## Why a worktree?
 
 Earlier jj + pre-commit integrations ran hooks in the user's working copy,
@@ -136,29 +129,6 @@ use `cargo install --path .` to build from source. From v0.3.12 onward,
 `cargo binstall jj-hooks` pulls from the standalone repository's Releases; older
 pins resolve against the zireael monorepo and, once it goes private, fall back
 to a source build.
-
-### Via Nix flake
-
-```bash
-nix profile install github:mattwilkinsonn/jj-hooks#jj-hooks
-```
-
-This adds `jj-hooks` to the current Nix profile without replacing installations
-from other methods. To remove it, find its entry with `nix profile list` and
-remove that entry with `nix profile remove <index>`.
-
-Removing the package does not revert optional configuration from `jj-hp init`.
-Remove only the user-level jj settings you chose to add; remove jjui actions and
-bindings from the jjui config manually. `jj new <exact-hash>` changes the jj
-workspace revision only; it does not remove a profile package or revert user
-configuration.
-
-### Run with Nix without installing
-
-```bash
-nix run github:mattwilkinsonn/jj-hooks#jj-hp -- --help
-nix run github:mattwilkinsonn/jj-hooks#jj-hooks -- --help
-```
 
 ### Via Homebrew tap
 

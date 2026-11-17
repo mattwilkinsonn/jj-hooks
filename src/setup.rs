@@ -130,15 +130,6 @@ pub fn load_steps(jj: &JjCli) -> Result<Vec<SetupStep>> {
 /// [`JjHooksError::SetupFailed`] variant so the failure message has
 /// real context attached instead of just "exited with status 1".
 pub fn run_steps(steps: &[SetupStep], worktree: &Path, workspace_root: &Path) -> Result<String> {
-    run_steps_with_policy(steps, worktree, workspace_root, false)
-}
-
-pub(crate) fn run_steps_with_policy(
-    steps: &[SetupStep],
-    worktree: &Path,
-    workspace_root: &Path,
-    preserve_gate_env: bool,
-) -> Result<String> {
     let mut captured = String::new();
     for step in steps {
         if step.run.is_empty() {
@@ -161,7 +152,7 @@ pub(crate) fn run_steps_with_policy(
         // Merge the repo's direnv/devenv env (once-computed, cached) BEFORE
         // JJ_HOOKS_WORKSPACE so that variable always wins. No-op unless a
         // batch entrypoint populated the cache for this workspace_root.
-        crate::repo_env::apply_repo_env_with_policy(&mut cmd, workspace_root, preserve_gate_env);
+        crate::repo_env::apply_repo_env(&mut cmd, workspace_root);
         // Point CARGO_TARGET_DIR at the primary `target/` AFTER apply_repo_env
         // so a repo-env-carried value can never win. No-op unless enabled.
         crate::gate_cache::apply_gate_cache(&mut cmd, workspace_root);
@@ -184,15 +175,9 @@ pub(crate) fn run_steps_with_policy(
         }
 
         if !output.status.success() {
-            let status = output.status.code().ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "setup step `{}` terminated by signal",
-                    step.label()
-                ))
-            })?;
             return Err(JjHooksError::SetupFailed {
                 name: step.label().to_owned(),
-                status,
+                status: output.status.code().unwrap_or(-1),
                 captured,
             });
         }
