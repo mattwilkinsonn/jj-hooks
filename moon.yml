@@ -10,26 +10,29 @@ tasks:
     args: ["build", "--locked"]
     options:
       cache: false
-      # Nebula devshell has no cargo (RIG-10808). Enable once a Rust toolchain is added.
+      # Root devshell has cargo. runInCI stays false: moon ci does not run this task.
       runInCI: false
   test:
     command: "cargo"
     args: ["nextest", "run", "--locked", "--no-fail-fast"]
     options:
       cache: false
-      # Nebula devshell has no cargo or jj (RIG-10808). The suite drives real jj repos and hook backends.
+      # Needs the jj-hooks devShell (.#jj-hooks), which provides the hook backends
+      # (pre-commit, prek, lefthook, hk, pkl) the suite drives. CD runs this task in it.
+      # The suite uses nixpkgs hk 2.11.1; the package check pins the hk input to v1.48.0.
+      # Fixtures fetch the hk@1.45.0 Config.pkl over the network on first run.
       runInCI: false
   lint:
     command: "cargo"
     args: ["clippy", "--all-targets", "--", "-D", "warnings"]
     options:
       cache: false
-      # Nebula devshell has no cargo (RIG-10808). Enable once a Rust toolchain is added.
+      # Root devshell has cargo. runInCI stays false: moon ci does not run this task.
       runInCI: false
   fmt:
     command: "cargo"
     args: ["fmt", "--check"]
     options:
       cache: false
-      # Nebula devshell has no cargo (RIG-10808). Enable once a Rust toolchain is added.
+      # Root devshell has cargo. runInCI stays false: moon ci does not run this task.
       runInCI: false
