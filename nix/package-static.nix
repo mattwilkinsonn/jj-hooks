@@ -13,52 +13,66 @@ let
   cargoToml = lib.importTOML ../Cargo.toml;
   target = if pkgs.stdenv.hostPlatform.isLinux then pkgs.pkgsStatic else pkgs;
 in
-target.rustPlatform.buildRustPackage {
-  pname = "jj-hooks-static";
-  version = cargoToml.package.version;
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [
-      ../.cargo/config.toml
-      ../Cargo.toml
-      ../Cargo.lock
-      ../README.md
-      ../src
-      ../tests
-    ];
-  };
+target.rustPlatform.buildRustPackage (
+  {
+    pname = "jj-hooks-static";
+    version = cargoToml.package.version;
+    src = lib.fileset.toSource {
+      root = ../.;
+      fileset = lib.fileset.unions [
+        ../.cargo/config.toml
+        ../Cargo.toml
+        ../Cargo.lock
+        ../README.md
+        ../src
+        ../tests
+      ];
+    };
 
-  cargoLock.lockFile = ../Cargo.lock;
+    cargoLock.lockFile = ../Cargo.lock;
 
-  doCheck = false;
+    doCheck = false;
 
-  doInstallCheck = true;
-  installCheckPhase = ''
-    runHook preInstallCheck
-    for binary in jj-hooks jj-hp; do
-      "$out/bin/$binary" --version >/dev/null
-    done
-  ''
-  + lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
-    # Fail here, not at check-asset, if a dylib comes from the store.
-    for binary in jj-hooks jj-hp; do
-      if otool -L "$out/bin/$binary" | grep -q /nix/store; then
-        otool -L "$out/bin/$binary"
-        exit 1
-      fi
-    done
-  ''
-  + ''
-    runHook postInstallCheck
-  '';
-
-  meta = {
-    description = "Portable jj-hooks release binaries (jj-hp pre-push gate)";
-    homepage = "https://github.com/mattwilkinsonn/jj-hooks";
-    license = with lib.licenses; [
-      mit
-      asl20
-    ];
-    mainProgram = "jj-hp";
-  };
-}
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      for binary in jj-hooks jj-hp; do
+        "$out/bin/$binary" --version >/dev/null
+      done
+    ''
+    + lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+      # Fail here, not at check-asset, if a dylib comes from the store.
+      for binary in jj-hooks jj-hp; do
+        if otool -L "$out/bin/$binary" | grep -q /nix/store; then
+          otool -L "$out/bin/$binary"
+          exit 1
+        fi
+      done
+    ''
+    + ''
+      runHook postInstallCheck
+    '';
+    meta = {
+      description = "Portable jj-hooks release binaries (jj-hp pre-push gate)";
+      homepage = "https://github.com/mattwilkinsonn/jj-hooks";
+      license = with lib.licenses; [
+        mit
+        asl20
+      ];
+      mainProgram = "jj-hp";
+    };
+  }
+  // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+    nativeBuildInputs = [ pkgs.darwin.autoSignDarwinBinariesHook ];
+    # Darwin only: the stdenv's libiconv (propagated by apple-sdk) has a
+    # /nix/store install name that libc's #[link(name = "iconv")] pulls in.
+    # Repoint both binaries at the system dylib (dyld shared cache, same ABI).
+    # The auto-sign hook re-signs in postFixupHooks; installCheck only checks.
+    postFixup = ''
+      for binary in jj-hooks jj-hp; do
+        install_name_tool -change "${pkgs.darwin.libiconv}/lib/libiconv.2.dylib" \
+          /usr/lib/libiconv.2.dylib "$out/bin/$binary"
+      done
+    '';
+  }
+)
