@@ -564,6 +564,25 @@ fi
         );
         path
     }
+
+    /// Assert `git worktree list` names only the primary checkout. git lists
+    /// the resolved path; on darwin `/tmp` is a symlink to `/private/tmp`, so
+    /// the expected path is canonicalized too.
+    pub fn assert_only_primary_worktree(&self) {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&self.primary)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", show(&output));
+        let listing = String::from_utf8(output.stdout).unwrap();
+        let paths: Vec<_> = listing
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .collect();
+        let resolved_primary = std::fs::canonicalize(&self.primary).unwrap();
+        assert_eq!(paths, [resolved_primary.to_str().unwrap()], "{listing}");
+    }
 }
 
 pub fn run(cwd: &Path, prog: &str, args: &[&str]) {

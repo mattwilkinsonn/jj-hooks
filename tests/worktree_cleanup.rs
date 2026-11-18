@@ -3,7 +3,6 @@
 mod harness;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[cfg(target_os = "linux")]
 use harness::PRE_PUSH_SLEEPER;
@@ -62,25 +61,12 @@ fn push_with_root(repo: &TestRepo, root: &Path, cwd_out: &Path) -> std::process:
     )
 }
 
-fn assert_only_primary_worktree(repo: &TestRepo) {
-    let output = Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo.primary())
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", show(&output));
-    let listing = String::from_utf8(output.stdout).unwrap();
-    let paths: Vec<_> = listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .collect();
-    assert_eq!(paths, [repo.primary().to_str().unwrap()], "{listing}");
-}
-
 fn assert_worktree_was_cleaned(repo: &TestRepo, root: &Path, cwd_out: &Path) {
     let cwd = std::fs::read_to_string(cwd_out).unwrap();
+    // The hook's cwd is the resolved path; on darwin /tmp is a symlink to /private/tmp.
+    let resolved_root = std::fs::canonicalize(root).unwrap();
     assert!(
-        cwd.starts_with(root.to_str().unwrap()),
+        cwd.starts_with(resolved_root.to_str().unwrap()),
         "hook cwd was {cwd:?}"
     );
     assert!(
@@ -88,7 +74,7 @@ fn assert_worktree_was_cleaned(repo: &TestRepo, root: &Path, cwd_out: &Path) {
         "worktree still exists at {cwd}"
     );
     assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
-    assert_only_primary_worktree(repo);
+    repo.assert_only_primary_worktree();
 }
 
 #[test]
@@ -179,8 +165,10 @@ fn next_push_sweeps_worktree_after_owner_is_killed() {
     );
     let cwd = std::fs::read_to_string(&cwd_out).unwrap();
     let pgrp = std::fs::read_to_string(&pgrp_out).unwrap();
+    // The hook's cwd is the resolved path; on darwin /tmp is a symlink to /private/tmp.
+    let resolved_root = std::fs::canonicalize(&root).unwrap();
     assert!(
-        cwd.starts_with(root.to_str().unwrap()),
+        cwd.starts_with(resolved_root.to_str().unwrap()),
         "sleeper cwd was {cwd:?}"
     );
     let jj_hp_stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
