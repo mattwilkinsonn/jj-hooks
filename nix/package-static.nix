@@ -43,7 +43,7 @@ target.rustPlatform.buildRustPackage (
     + lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
       # Fail here, not at check-asset, if a dylib comes from the store.
       for binary in jj-hooks jj-hp; do
-        if otool -L "$out/bin/$binary" | grep -q /nix/store; then
+        if otool -L "$out/bin/$binary" | tail -n +2 | grep -q /nix/store; then
           otool -L "$out/bin/$binary"
           exit 1
         fi
