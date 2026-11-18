@@ -10,13 +10,10 @@ All notable changes to jj-hooks are tracked here.
   `JJ_HOOKS_GATE_SLOTS`, with a bounded wait timeout.
 
 ### Fixed
-
-- Runner lookup uses the same patched, inherited, or removed PATH as hook and
+- Runner lookup now uses the same patched, inherited, or removed PATH as hook and
   setup subprocesses, including for `uv`; missing runners report their name and
-  PATH source. It skips non-UTF-8 candidates in favor of later UTF-8 matches
-  and reports a non-UTF-8 runner path when no UTF-8 match exists. It checks
-  current-user execute access. Process spawn failures now name the command and
-  working directory and keep the OS error.
+  PATH source. Spawn errors now include argv0 and cwd while retaining the IO cause.
+
 - The sweep now reaps a worktree whose owner repository was deleted, once its
   owner record is an hour old. Before, it logged `not a git repository` on every
   run and kept the checkout forever.

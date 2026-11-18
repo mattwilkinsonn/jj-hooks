@@ -375,8 +375,9 @@ fn run_hk_validate(argv: &[String], cwd: &Path, workspace_root: &Path) -> bool {
             );
             false
         }
-        Err(error) => {
-            tracing::debug!("hk Pkl cache warm failed: {error}");
+        Err(e) => {
+            let error = crate::error::spawn_context(e, &argv[0], cwd);
+            tracing::debug!("hk Pkl cache warm failed to spawn: {error}");
             false
         }
     }
@@ -788,9 +789,10 @@ struct OnceOutcome {
 /// produced by `hook_command{,_all_files}` / `lefthook_command{,_all_files}`)
 /// with the resolved argv prefix from [`crate::runner::resolve_runner_argv`].
 ///
-/// For the common case the prefix is a single element (an absolute path),
-/// so this is a near-no-op. The `uv run --` wrapper case uses multiple
-/// elements; we drop the placeholder name and splice in the wrapper.
+/// For the common case the prefix is a single element (an absolute path
+/// or just the bare name found on $PATH), so this is a near-no-op. For
+/// the `uv run --` wrapper case the prefix is multiple elements; we
+/// drop the placeholder name and splice in the wrapper.
 fn splice_runner_prefix(prefix: &[String], command_argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(prefix.len() + command_argv.len().saturating_sub(1));
     out.extend(prefix.iter().cloned());
@@ -1238,13 +1240,15 @@ fn run_subprocess(
     cmd.env("JJ_HOOKS_WORKSPACE", workspace_root);
     match capture {
         None => {
-            let status = crate::interrupt::status(&mut cmd)?;
+            let status = crate::interrupt::status(&mut cmd)
+                .map_err(|error| crate::error::spawn_context(error, &argv[0], cwd))?;
             status
                 .code()
                 .ok_or_else(|| std::io::Error::other("hook runner terminated by signal").into())
         }
         Some(buf) => {
-            let output = crate::interrupt::output(&mut cmd)?;
+            let output = crate::interrupt::output(&mut cmd)
+                .map_err(|error| crate::error::spawn_context(error, &argv[0], cwd))?;
             // Tag the captured block with the argv so the user can
             // see which subprocess produced each chunk when N hook
             // backends are multiplexed.

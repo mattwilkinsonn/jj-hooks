@@ -166,7 +166,8 @@ pub(crate) fn run_steps_with_policy(
         // so a repo-env-carried value can never win. No-op unless enabled.
         crate::gate_cache::apply_gate_cache(&mut cmd, workspace_root);
         cmd.env("JJ_HOOKS_WORKSPACE", workspace_root);
-        let output = crate::interrupt::output(&mut cmd)?;
+        let output = crate::interrupt::output(&mut cmd)
+            .map_err(|error| crate::error::spawn_context(error, &step.run[0], worktree))?;
 
         // Header line so the caller can tell which step produced
         // which captured output when there are multiple steps. Cheap

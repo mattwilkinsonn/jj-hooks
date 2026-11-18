@@ -390,14 +390,9 @@ structured error naming the missing binary instead of a libc-level
    Relative and empty entries resolve against the ephemeral worktree cwd. jj-hp
    selects the matching executable before spawn.
 
-If the only executable match has a non-UTF-8 path, jj-hp reports that path
-instead of replacing it with a lossy argv0. Use a UTF-8 path or an explicit
-wrapper.
-
-If the error says `hook runner ‹bin› could not be resolved`, no configured
-layer matched. Runner lookup uses the effective child PATH, which may differ
-from the PATH visible to `jj-hp`. Install the runner globally (`brew install
-prek`, `pipx install prek`, or `uv tool install prek`), activate your venv
+If you see `hook runner ‹bin› is not on $PATH`, none of the four layers
+matched. Either install the runner globally (`brew install prek`,
+`pipx install prek`, `uv tool install prek`), activate your venv
 before invoking `jj-hp`, or set `jj-hooks.runner-bin.<runner>`.
 
 ## Repo environment (direnv / devenv)

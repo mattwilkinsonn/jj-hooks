@@ -248,42 +248,23 @@ pub fn prek_on_path() -> bool {
 
 fn which(bin: &str) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    match which_in_path(bin, std::env::var_os("PATH").as_deref(), &cwd) {
-        PathLookup::Found(path) => Some(path),
-        PathLookup::NonUtf8Candidate(_) | PathLookup::NotFound => None,
-    }
+    which_in_path(bin, std::env::var_os("PATH").as_deref(), &cwd)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum PathLookup {
-    Found(PathBuf),
-    NonUtf8Candidate(PathBuf),
-    NotFound,
-}
-
-fn which_in_path(bin: &str, path: Option<&OsStr>, cwd: &Path) -> PathLookup {
-    let Some(path) = path else {
-        return PathLookup::NotFound;
-    };
-    let Ok(cwd) = std::path::absolute(cwd) else {
-        return PathLookup::NotFound;
-    };
-    let mut non_utf8_candidate = None;
+fn which_in_path(bin: &str, path: Option<&OsStr>, cwd: &Path) -> Option<PathBuf> {
+    let path = path?;
+    let cwd = std::path::absolute(cwd).ok()?;
     for dir in std::env::split_paths(path) {
         let candidate = if dir.is_absolute() {
             dir.join(bin)
         } else {
             cwd.join(dir).join(bin)
         };
-        if !is_executable(&candidate) {
-            continue;
+        if is_executable(&candidate) {
+            return Some(candidate);
         }
-        if candidate.to_str().is_some() {
-            return PathLookup::Found(candidate);
-        }
-        non_utf8_candidate.get_or_insert(candidate);
     }
-    non_utf8_candidate.map_or(PathLookup::NotFound, PathLookup::NonUtf8Candidate)
+    None
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -295,7 +276,8 @@ fn is_executable(path: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
     }
     #[cfg(not(unix))]
     {
@@ -309,22 +291,28 @@ fn resolve_on_path(
     cwd: &Path,
     path_source: &'static str,
 ) -> Result<Vec<String>> {
-    match which_in_path(bin, path, cwd) {
-        PathLookup::Found(path) => return Ok(vec![path.to_string_lossy().into_owned()]),
-        PathLookup::NonUtf8Candidate(path) => {
-            return Err(JjHooksError::RunnerPathNotUtf8 {
-                bin: bin.to_owned(),
-                path: path.to_string_lossy().into_owned(),
-                path_source,
-            });
-        }
-        PathLookup::NotFound => {}
+    if let Some(path) = which_in_path(bin, path, cwd) {
+        return Ok(vec![path.to_string_lossy().into_owned()]);
     }
 
     Err(JjHooksError::RunnerNotFound {
         bin: bin.to_owned(),
         path_source,
     })
+}
+/// Reject lossy PATH conversions before returning an executable argv.
+fn validate_path_entries_utf8(path: Option<&OsStr>) -> Result<()> {
+    if let Some(path) = path {
+        for entry in std::env::split_paths(path) {
+            if entry.to_str().is_none() {
+                return Err(JjHooksError::Parse(format!(
+                    "PATH entry `{}` is not valid UTF-8",
+                    entry.to_string_lossy()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a hook runner to an argv prefix.
@@ -335,9 +323,9 @@ fn resolve_on_path(
 /// Relative PATH entries resolve against the child working directory.
 ///
 /// # Errors
-/// Returns [`JjHooksError::RunnerNotFound`] when no layer finds the runner, or
-/// [`JjHooksError::RunnerPathNotUtf8`] when the only PATH match has a non-UTF-8 path.
-/// Both errors include the effective PATH source used for lookup.
+///
+/// Returns [`JjHooksError::RunnerNotFound`] when no layer finds the runner.
+/// The error includes the effective PATH source used for lookup.
 pub fn resolve_runner_argv(
     runner: Runner,
     jj: &JjCli,
@@ -385,10 +373,11 @@ pub(crate) fn resolve_runner_argv_for_cwd(
 
     // Resolve from the same environment patch that the child command receives.
     let (effective_path, path_source) = crate::repo_env::effective_path(workspace_root);
+    validate_path_entries_utf8(effective_path.as_deref())?;
     // The project flag must point at workspace_root because the ephemeral worktree has no `.venv`.
     if matches!(runner, Runner::PreCommit | Runner::Prek)
         && workspace_root.join("uv.lock").exists()
-        && let PathLookup::Found(uv) = which_in_path("uv", effective_path.as_deref(), child_cwd)
+        && let Some(uv) = which_in_path("uv", effective_path.as_deref(), child_cwd)
     {
         tracing::debug!("runner {}: resolved via `uv run --project`", runner.bin());
         return Ok(vec![
@@ -639,8 +628,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    #[cfg(target_os = "linux")]
+    fn validate_path_entries_rejects_non_utf8_entry() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let invalid_entry = tmp.path().join(OsStr::from_bytes(b"runner-\xff"));
+        let path = std::env::join_paths([invalid_entry.as_os_str()]).unwrap();
+        let error = validate_path_entries_utf8(Some(&path)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            JjHooksError::Parse(message)
+                if message.contains("PATH entry")
+                    && message.contains(&invalid_entry.to_string_lossy().to_string())
+                    && message.contains("not valid UTF-8")
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
     fn resolver_skips_non_utf8_path_entry_before_valid_runner() {
         use std::os::unix::ffi::OsStrExt;
 
@@ -662,31 +669,18 @@ mod tests {
         let workspace = tmp.path().join("workspace");
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let runner = write_executable(&bin, Runner::Hk.bin());
+        let runner = bin.join(Runner::Hk.bin());
+        std::fs::write(&runner, b"#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
         let jj = init_test_workspace(&workspace);
         crate::repo_env::test_seed(&workspace, crate::repo_env::EnvPatch::Disabled);
 
         let old_path = std::env::var_os("PATH");
         let _restore = RestorePath(old_path.clone());
         let invalid_dir = tmp.path().join(OsStr::from_bytes(b"invalid-\xff"));
-        std::fs::create_dir(&invalid_dir).unwrap();
-        write_executable(&invalid_dir, Runner::Hk.bin());
-        let expected_path = std::env::join_paths([&invalid_dir, &bin]).unwrap();
-        let expected = resolve_on_path(
-            Runner::Hk.bin(),
-            Some(&expected_path),
-            &workspace,
-            "test PATH",
-        )
-        .unwrap();
-        assert_eq!(expected, vec![runner.to_string_lossy().into_owned()]);
         let mut entries = vec![invalid_dir, bin];
-        entries.extend(
-            old_path
-                .as_deref()
-                .into_iter()
-                .flat_map(std::env::split_paths),
-        );
+        entries.extend(old_path.as_deref().into_iter().flat_map(std::env::split_paths));
         let path = std::env::join_paths(entries).unwrap();
         // SAFETY: nextest runs each test in a separate process.
         unsafe { std::env::set_var("PATH", path) };
@@ -702,54 +696,33 @@ mod tests {
         .unwrap();
         assert_eq!(argv, vec![runner.to_string_lossy().into_owned()]);
     }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn resolver_returns_distinct_error_for_sole_non_utf8_path_match() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let non_utf8_bin = tmp.path().join(OsStr::from_bytes(b"bin-\xff"));
-        std::fs::create_dir(&non_utf8_bin).unwrap();
-        write_executable(&non_utf8_bin, Runner::Hk.bin());
-        let path = std::env::join_paths([&non_utf8_bin]).unwrap();
-
-        let error = resolve_on_path(
-            Runner::Hk.bin(),
-            Some(&path),
-            &workspace,
-            "repo-env PATH patch",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("bin-�"));
-        assert!(matches!(
-            error,
-            JjHooksError::RunnerPathNotUtf8 { ref bin, ref path, path_source: "repo-env PATH patch" }
-                if bin == Runner::Hk.bin() && path.contains("bin-�") && path.ends_with("/hk")
-        ));
-    }
-
     #[test]
     #[cfg(unix)]
     fn resolver_spawns_patched_only_runner_and_rejects_removed_path() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("workspace");
         let child = tmp.path().join("child");
+        let parent_bin = tmp.path().join("parent-bin");
         let patched_bin = tmp.path().join("patched-bin");
-        std::fs::create_dir_all(&patched_bin).unwrap();
         std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&parent_bin).unwrap();
+        std::fs::create_dir_all(&patched_bin).unwrap();
         let jj = init_test_workspace(&workspace);
+        let parent_marker = tmp.path().join("parent-marker");
         let patched_marker = tmp.path().join("patched-marker");
-        let path = patched_bin.join(Runner::Hk.bin());
-        std::fs::write(
-            &path,
-            format!("#!/bin/sh\nprintf ok > '{}'\n", patched_marker.display()),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (bin, marker) in [
+            (&parent_bin, &parent_marker),
+            (&patched_bin, &patched_marker),
+        ] {
+            let path = bin.join(Runner::Hk.bin());
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf ok > '{}'\n", marker.display()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         seed_path(&workspace, Some(patched_bin.display().to_string()));
         let argv = resolve_runner_argv_for_cwd(
@@ -763,6 +736,8 @@ mod tests {
         .unwrap();
         run_resolved(&argv, &child, &workspace, &patched_marker);
         assert!(patched_marker.exists());
+        assert!(!parent_marker.exists());
+
         seed_path(&workspace, None);
         let error = resolve_runner_argv_for_cwd(
             Runner::Hk,
@@ -830,24 +805,32 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("workspace");
         let child = tmp.path().join("child");
+        let parent_bin = tmp.path().join("parent-bin");
         let patched_bin = tmp.path().join("patched-bin");
         std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&parent_bin).unwrap();
         std::fs::create_dir_all(&patched_bin).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("uv.lock"), "version = 1\n").unwrap();
         let jj = init_test_workspace(&workspace);
+        let parent_marker = tmp.path().join("parent-uv");
         let patched_marker = tmp.path().join("patched-uv");
-        let uv = patched_bin.join("uv");
-        std::fs::write(
-            &uv,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-                patched_marker.display()
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (dir, marker) in [
+            (&parent_bin, &parent_marker),
+            (&patched_bin, &patched_marker),
+        ] {
+            let uv = dir.join("uv");
+            std::fs::write(
+                &uv,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         seed_path(&workspace, Some(patched_bin.display().to_string()));
         let argv = resolve_runner_argv_for_cwd(
@@ -875,11 +858,14 @@ mod tests {
             std::fs::read_to_string(patched_marker).unwrap(),
             format!("run\n--project\n{}\n--\nprek\n", workspace.display())
         );
+        assert!(!parent_marker.exists());
     }
 
     #[test]
     fn resolve_on_path_finds_runner_only_in_patched_path() {
+        let parent_bin = tempfile::TempDir::new().unwrap();
         let patched_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), Runner::Hk.bin());
         write_executable(patched_bin.path(), Runner::Lefthook.bin());
 
         assert_eq!(
@@ -894,6 +880,8 @@ mod tests {
                 patched_bin
                     .path()
                     .join(Runner::Lefthook.bin())
+                    .canonicalize()
+                    .unwrap()
                     .display()
                     .to_string()
             ]
@@ -905,22 +893,19 @@ mod tests {
             "repo-env PATH patch",
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            JjHooksError::RunnerNotFound {
-                bin,
-                path_source: "repo-env PATH patch"
-            } if bin == Runner::Hk.bin()
-        ));
+        assert!(
+            matches!(error, JjHooksError::RunnerNotFound { ref bin, path_source: "repo-env PATH patch" } if bin == Runner::Hk.bin())
+        );
     }
 
     #[test]
     fn resolve_on_path_does_not_fall_back_when_path_is_removed() {
-        let cwd = tempfile::TempDir::new().unwrap();
+        let parent_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), Runner::Hk.bin());
         let error = resolve_on_path(
             Runner::Hk.bin(),
             None,
-            cwd.path(),
+            parent_bin.path(),
             "PATH removed by repo-env patch",
         )
         .unwrap_err();
@@ -940,13 +925,34 @@ mod tests {
             "inherited PATH",
         )
         .unwrap();
-        assert_eq!(result, vec![expected.display().to_string()]);
+        assert_eq!(
+            result,
+            vec![
+                inherited_bin
+                    .path()
+                    .join(Runner::Hk.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
+        );
         assert!(expected.is_file());
     }
 
     #[test]
     fn uv_lookup_uses_the_effective_path() {
+        let parent_bin = tempfile::TempDir::new().unwrap();
         let patched_bin = tempfile::TempDir::new().unwrap();
+        write_executable(parent_bin.path(), "uv");
+        assert!(
+            which_in_path(
+                "uv",
+                Some(patched_bin.path().as_os_str()),
+                patched_bin.path(),
+            )
+            .is_none()
+        );
         let patched_uv = write_executable(patched_bin.path(), "uv");
         assert_eq!(
             which_in_path(
@@ -954,7 +960,7 @@ mod tests {
                 Some(patched_bin.path().as_os_str()),
                 patched_bin.path(),
             ),
-            PathLookup::Found(patched_uv)
+            Some(patched_uv.canonicalize().unwrap())
         );
     }
 
@@ -963,8 +969,8 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
         let parent_bin = tempfile::TempDir::new().unwrap();
         let patched_bin = tempfile::TempDir::new().unwrap();
-        let parent_runner = write_executable(parent_bin.path(), Runner::Hk.bin());
-        let patched_runner = write_executable(patched_bin.path(), Runner::Lefthook.bin());
+        write_executable(parent_bin.path(), Runner::Hk.bin());
+        write_executable(patched_bin.path(), Runner::Lefthook.bin());
 
         crate::repo_env::test_seed(
             workspace.path(),
@@ -986,7 +992,15 @@ mod tests {
                 source,
             )
             .unwrap(),
-            vec![patched_runner.display().to_string()]
+            vec![
+                patched_bin
+                    .path()
+                    .join(Runner::Lefthook.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
         );
         assert!(matches!(
             resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source),
@@ -1018,7 +1032,15 @@ mod tests {
         assert_eq!(source, "inherited PATH");
         assert_eq!(
             resolve_on_path(Runner::Hk.bin(), path.as_deref(), workspace.path(), source).unwrap(),
-            vec![parent_runner.display().to_string()]
+            vec![
+                parent_bin
+                    .path()
+                    .join(Runner::Hk.bin())
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ]
         );
     }
 
@@ -1039,14 +1061,8 @@ mod tests {
         let child_found =
             which_in_path(Runner::Hk.bin(), Some(OsStr::new("bin")), child_cwd.path());
 
-        assert_eq!(
-            parent_found,
-            PathLookup::Found(parent_bin.join(Runner::Hk.bin()))
-        );
-        assert_eq!(
-            child_found,
-            PathLookup::Found(child_bin.join(Runner::Hk.bin()))
-        );
+        assert_eq!(parent_found, Some(parent_bin.join(Runner::Hk.bin())));
+        assert_eq!(child_found, Some(child_bin.join(Runner::Hk.bin())));
         assert_ne!(parent_found, child_found);
     }
 
@@ -1057,10 +1073,7 @@ mod tests {
         write_executable(child_cwd.path(), Runner::Hk.bin());
 
         let found = which_in_path(Runner::Hk.bin(), Some(OsStr::new("")), child_cwd.path());
-        assert_eq!(
-            found,
-            PathLookup::Found(child_cwd.path().join(Runner::Hk.bin()))
-        );
+        assert_eq!(found, Some(child_cwd.path().join(Runner::Hk.bin())));
     }
 
     #[test]
