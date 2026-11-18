@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+#
+# Tasks run from this project's directory, which is the crate root.
+layer: "tool"
+language: "rust"
+tags: ["rust"]
+tasks:
+  build:
+    command: "cargo"
+    args: ["build", "--locked"]
+    options:
+      cache: false
+      # Nebula devshell has no cargo (RIG-10808). Enable once a Rust toolchain is added.
+      runInCI: false
+  test:
+    command: "cargo"
+    args: ["nextest", "run", "--locked", "--no-fail-fast"]
+    options:
+      cache: false
+      # Nebula devshell has no cargo or jj (RIG-10808). The suite drives real jj repos and hook backends.
+      runInCI: false
+  lint:
+    command: "cargo"
+    args: ["clippy", "--all-targets", "--", "-D", "warnings"]
+    options:
+      cache: false
+      # Nebula devshell has no cargo (RIG-10808). Enable once a Rust toolchain is added.
+      runInCI: false
+  fmt:
+    command: "cargo"
+    args: ["fmt", "--check"]
+    options:
+      cache: false
+      # Nebula devshell has no cargo (RIG-10808). Enable once a Rust toolchain is added.
+      runInCI: false
