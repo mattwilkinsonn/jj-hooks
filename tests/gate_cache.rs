@@ -5,8 +5,7 @@
 //!
 //! These drive the real CLI push pipeline (`jj-hp push`) and the batch API,
 //! asserting what `CARGO_TARGET_DIR` the hook child actually observed via the
-//! `PRE_PUSH_RECORD_CARGO_TARGET_DIR` fixture. See
-//! `docs/designs/tools/jj-hp-gate-worktree-cost.md`.
+//! `PRE_PUSH_RECORD_CARGO_TARGET_DIR` fixture. The design record is kept privately.
 
 mod harness;
 

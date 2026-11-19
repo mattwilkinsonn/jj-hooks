@@ -17,7 +17,7 @@
 //! (`git rev-parse --local-env-vars`) is always stripped from the child (see
 //! [`strip_git_local_env`]); that safety strip is the one deliberate
 //! difference from a bare parent-env spawn.
-//! See `docs/designs/tools/jj-hp-devenv-hook-env.md`.
+//! The design record for this patch is kept privately.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
