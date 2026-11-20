@@ -5,7 +5,7 @@ mod harness;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
-use harness::PRE_PUSH_SLEEPER;
+use harness::{PRE_PUSH_SLEEPER, TickLoopGuard};
 use harness::{TestRepo, show};
 
 const PRE_PUSH_RECORD_CWD: &str = r#"
@@ -132,6 +132,8 @@ fn next_push_sweeps_worktree_after_owner_is_killed() {
     let pgrp_out = repo.tmp.path().join("hook-pgrp");
     let pid_out = repo.tmp.path().join("sleeper-pid");
     let tick_out = repo.tmp.path().join("sleeper-tick");
+    // Kills the tick loop on any exit, including a failed assertion below.
+    let _tick_guard = TickLoopGuard::new(pid_out.clone(), tick_out.clone());
     let log = repo.tmp.path().join("jj-hp.log");
     let root_env = root.to_str().unwrap();
     let cwd_env = cwd_out.to_str().unwrap();

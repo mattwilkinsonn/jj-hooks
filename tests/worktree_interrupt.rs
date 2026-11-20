@@ -19,7 +19,7 @@ const SIGTERM: i32 = 15;
 const PUSH_ARGS: [&str; 5] = ["--runner", "pre-commit", "push", "-b", "main"];
 
 /// The `PRE_PUSH_SLEEPER` body, for a setup step.
-const SLEEPER_SCRIPT: &str = r#"set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (while :; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait"#;
+const SLEEPER_SCRIPT: &str = r#"set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (i=0; while [ "$i" -lt 600 ] && [ -d "${JJ_HOOKS_TEST_TICK_OUT%/*}" ]; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; i=$((i + 1)); done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait"#;
 
 const PRE_PUSH_RECORD_SESSION: &str = r#"
 repos:
