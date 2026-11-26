@@ -21,7 +21,7 @@
 //! that the spawn sites read back via [`apply_gate_cache`]. When opted out,
 //! [`apply_gate_cache`] is a strict no-op — it does NOT clear an inherited
 //! value, so the child env is byte-identical to the pre-fix behavior.
-//! See `docs/designs/tools/jj-hp-gate-worktree-cost.md` (Mode A / T1).
+//! The design record for this mechanism is kept privately.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

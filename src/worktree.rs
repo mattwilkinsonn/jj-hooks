@@ -807,7 +807,12 @@ mod tests {
             .unwrap();
         assert!(listing.status.success());
         let listing = String::from_utf8_lossy(&listing.stdout);
-        assert!(listing.contains(&format!("worktree {}", stale.display())));
+        // git records the resolved path; on darwin /tmp is a symlink to /private/tmp.
+        let stale_listed = std::fs::canonicalize(_temp.path())
+            .unwrap()
+            .join("a-stale-parent")
+            .join("stale-worktree");
+        assert!(listing.contains(&format!("worktree {}", stale_listed.display())));
         assert!(super::registered_worktree(&git_dir, &dead).unwrap());
         let lock = lock_path(&dead);
         assert_eq!(listed_worktree_count(&primary), 3);

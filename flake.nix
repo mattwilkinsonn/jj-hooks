@@ -61,6 +61,8 @@
         packages = {
           jj-hooks = jjHooks;
           default = jjHooks;
+          # The portable release build nebula CD ships as the jj-hooks-bin asset.
+          jj-hooks-static = pkgs.callPackage ./nix/package-static.nix { };
         }
         // nixpkgs.lib.optionalAttrs hasReleaseBin {
           jj-hooks-bin = jjHooksBin;

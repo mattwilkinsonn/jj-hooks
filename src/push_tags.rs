@@ -6,8 +6,8 @@
 //! both primary and secondary jj workspaces (`git push` discovers
 //! the shared `.git` via the standard rules).
 //!
-//! Ported from `~/scripts/bin/jj-push-tags` during the dotfiles →
-//! zireael migration. The shell script is being retired; users get
+//! Ported from `~/scripts/bin/jj-push-tags` during the move from dotfiles
+//! into an earlier monorepo. The shell script is being retired; users get
 //! the same behaviour via `jj-hp push-tags …`.
 
 use std::process::Command;

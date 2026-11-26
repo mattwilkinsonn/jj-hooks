@@ -1013,7 +1013,7 @@ fn run_for_revset_uses_full_range_for_multi_commit_revset() {
     // called `jj log -r '<revset>' --limit 1` and treated that
     // single commit as the "to" target — so for a multi-commit
     // revset like `main..tip`, hooks ran against only the tip's
-    // 1-commit parent→tip slice. Real-world fallout (sea-621
+    // 1-commit parent→tip slice. Real-world fallout (RIG-621
     // stack): formatting drift introduced by middle commits
     // sailed past the pre-push gate.
     //

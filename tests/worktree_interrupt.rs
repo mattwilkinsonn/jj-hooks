@@ -19,7 +19,7 @@ const SIGTERM: i32 = 15;
 const PUSH_ARGS: [&str; 5] = ["--runner", "pre-commit", "push", "-b", "main"];
 
 /// The `PRE_PUSH_SLEEPER` body, for a setup step.
-const SLEEPER_SCRIPT: &str = r#"set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (while :; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait"#;
+const SLEEPER_SCRIPT: &str = r#"set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (i=0; while [ "$i" -lt 600 ] && [ -d "${JJ_HOOKS_TEST_TICK_OUT%/*}" ]; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; i=$((i + 1)); done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait"#;
 
 const PRE_PUSH_RECORD_SESSION: &str = r#"
 repos:
@@ -164,18 +164,7 @@ impl Fixture {
             "root not empty: {left:?}; log: {}",
             self.log()
         );
-        let output = Command::new("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(self.repo.primary())
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", show(&output));
-        let listing = String::from_utf8(output.stdout).unwrap();
-        let paths: Vec<_> = listing
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .collect();
-        assert_eq!(paths, [self.repo.primary().to_str().unwrap()], "{listing}");
+        self.repo.assert_only_primary_worktree();
     }
 
     fn assert_nothing_pushed(&self) {
@@ -245,10 +234,12 @@ fn assert_died_by(fixture: &Fixture, status: ExitStatus, signal: i32) {
 fn signal_during_sleeper(fixture: &Fixture, signal: i32) {
     let mut child = fixture.spawn(&[]);
     fixture.wait_for(&["cwd", "pgrp", "pid", "tick"]);
+    // The hook's cwd is the resolved path; on darwin /tmp is a symlink to /private/tmp.
+    let resolved_root = std::fs::canonicalize(&fixture.root).unwrap();
     assert!(
         fixture
             .read("cwd")
-            .starts_with(fixture.root.to_str().unwrap())
+            .starts_with(resolved_root.to_str().unwrap())
     );
     assert_ne!(
         fixture.read("pgrp"),

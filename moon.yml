@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+#
+# Tasks run from this project's directory, which is the crate root.
+layer: "tool"
+language: "rust"
+tags: ["rust"]
+tasks:
+  build:
+    command: "cargo"
+    args: ["build", "--locked"]
+    options:
+      cache: false
+      runInCI: true
+  test:
+    command: "nix"
+    args: ["develop", "../..#jj-hooks", "--command", "cargo", "nextest", "run", "--locked", "--no-fail-fast"]
+    options:
+      cache: false
+      # Enters the .#jj-hooks devShell, which provides the hook backends the suite drives
+      # (pre-commit, prek, lefthook, hk, pkl). The root devShell lacks them.
+      # The suite uses nixpkgs hk 2.11.1; the package check pins the hk input to v1.48.0.
+      # Fixtures fetch the hk@1.45.0 Config.pkl over the network on first run.
+      runInCI: true
+  lint:
+    command: "cargo"
+    args: ["clippy", "--all-targets", "--", "-D", "warnings"]
+    options:
+      cache: false
+      runInCI: true
+  fmt:
+    command: "cargo"
+    args: ["fmt", "--check"]
+    options:
+      cache: false
+      runInCI: true

@@ -564,6 +564,25 @@ fi
         );
         path
     }
+
+    /// Assert `git worktree list` names only the primary checkout. git lists
+    /// the resolved path; on darwin `/tmp` is a symlink to `/private/tmp`, so
+    /// the expected path is canonicalized too.
+    pub fn assert_only_primary_worktree(&self) {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&self.primary)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", show(&output));
+        let listing = String::from_utf8(output.stdout).unwrap();
+        let paths: Vec<_> = listing
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .collect();
+        let resolved_primary = std::fs::canonicalize(&self.primary).unwrap();
+        assert_eq!(paths, [resolved_primary.to_str().unwrap()], "{listing}");
+    }
 }
 
 pub fn run(cwd: &Path, prog: &str, args: &[&str]) {
@@ -622,18 +641,66 @@ repos:
 "#;
 
 /// Records `$PWD` and its pgrp, then waits on a ticking background loop whose PID it records.
+/// The loop stops by itself once its tick directory is removed or after 600 ticks.
 pub const PRE_PUSH_SLEEPER: &str = r#"
 repos:
   - repo: local
     hooks:
       - id: sleeper
         name: sleeper
-        entry: sh -c 'set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (while :; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait'
+        entry: sh -c 'set -- $(cat /proc/$$/stat); printf "%s" "$PWD" > "$JJ_HOOKS_TEST_CWD_OUT"; printf "%s" "$5" > "$JJ_HOOKS_TEST_PGRP_OUT"; (i=0; while [ "$i" -lt 600 ] && [ -d "${JJ_HOOKS_TEST_TICK_OUT%/*}" ]; do date > "$JJ_HOOKS_TEST_TICK_OUT"; sleep 0.1; i=$((i + 1)); done) & echo "$!" > "$JJ_HOOKS_TEST_PID_OUT"; wait'
         language: system
         stages: [pre-push]
         always_run: true
         pass_filenames: false
 "#;
+
+/// Kills the tick loop that `PRE_PUSH_SLEEPER` recorded in `pid_file`.
+///
+/// Hold it for the whole test: `Drop` also runs when the test panics. The
+/// loop normally stops by itself once its tick directory is removed, so this
+/// is the fast path. The PID is signalled only while its environment holds
+/// exactly `JJ_HOOKS_TEST_TICK_OUT=<tick_file>`, so a sibling test's loop, or
+/// a PID the kernel has reused, is left alone.
+#[cfg(target_os = "linux")]
+pub struct TickLoopGuard {
+    pid_file: PathBuf,
+    tick_file: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl TickLoopGuard {
+    pub fn new(pid_file: PathBuf, tick_file: PathBuf) -> Self {
+        Self {
+            pid_file,
+            tick_file,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TickLoopGuard {
+    fn drop(&mut self) {
+        let Ok(pid) = std::fs::read_to_string(&self.pid_file) else {
+            return;
+        };
+        let Ok(pid) = pid.trim().parse::<u32>() else {
+            return;
+        };
+        let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+            return;
+        };
+        let mut want = b"JJ_HOOKS_TEST_TICK_OUT=".to_vec();
+        want.extend_from_slice(self.tick_file.as_os_str().as_encoded_bytes());
+        if !environ.split(|byte| *byte == 0).any(|var| var == want) {
+            return;
+        }
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status();
+    }
+}
 
 pub const PRE_PUSH_FAILING: &str = r#"
 repos:
